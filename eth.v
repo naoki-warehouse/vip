@@ -34,9 +34,9 @@ fn (e EthHdr) to_bytes() []byte {
 }
 
 
-fn parse_eth_hdr(buf []byte, recv_size int, offset int) ?EthHdr {
-    if recv_size < int(sizeof(EthHdr)) + offset {
-        return error("recv size is too small $recv_size")
+fn parse_eth_hdr(buf []byte) ?EthHdr {
+    if buf.len < int(sizeof(EthHdr)){
+        return error("recv size is too small $buf.len")
     }
 
     eth_hdr := EthHdr{

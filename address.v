@@ -49,3 +49,10 @@ fn (ia IPv4Address) to_string() string {
 
     return s[1..]
 }
+
+struct AddrInfo {
+mut:
+    mac PhysicalAddress
+    ipv4 IPv4Address
+    port u16
+}

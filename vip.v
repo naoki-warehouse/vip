@@ -2,6 +2,7 @@ module main
 
 import os
 import time
+import rand
 
 #include <linux/if.h>
 #include <linux/if_tun.h>
@@ -65,18 +66,26 @@ fn (nd NetDevice) print() {
 }
 
 
-fn (mut nd NetDevice) handle_frame(buf []byte, recv_size int) ? {
-    println("recv $recv_size")
-    eth_hdr := parse_eth_hdr(buf, recv_size, 0) ?
+fn (mut nd NetDevice) handle_frame(buf []byte) ? {
+    println("recv $buf.len")
+    eth_hdr := parse_eth_hdr(buf) ?
     println("[ETH] $eth_hdr.to_string()")
+    mut addr_info := AddrInfo {
+        mac: eth_hdr.smac
+    }
     if eth_hdr.ether_type == u16(EtherType.arp) {
         arp_hdr := parse_arp_hdr(buf[14..]) ?
-        println("[ARP] $arp_hdr.to_string()")
         nd.handle_arp(&arp_hdr)
+    } else if eth_hdr.ether_type == u16(EtherType.ipv4) {
+        ipv4_hdr := parse_ipv4_hdr(buf[14..]) ?
+        offset := ipv4_hdr.header_length + 14
+        nd.handle_ipv4(&ipv4_hdr, buf[offset..], mut &addr_info) ?
     }
 }
 
 fn (mut nd NetDevice) handle_arp(arp_hdr &ArpHdr) {
+    println("[ARP] $arp_hdr.to_string()")
+
     arp_col := ArpTableCol{
         mac: arp_hdr.sha
         ip: arp_hdr.spa
@@ -116,6 +125,8 @@ fn (mut nd NetDevice) handle_arp(arp_hdr &ArpHdr) {
         pkt := Packet {
             l2_hdr : eth_req
             l3_hdr : arp_req
+            l4_hdr : HdrNone{}
+            payload: []byte{}
         }
 
         nd.send_frame(pkt)
@@ -126,7 +137,104 @@ fn (mut nd NetDevice) handle_arp(arp_hdr &ArpHdr) {
     }
 }
 
-fn (nd NetDevice) send_frame(pkt Packet) {
+fn (nd NetDevice) handle_ipv4(ipv4_hdr &IPv4Hdr, payload []byte, mut addr_info &AddrInfo) ? {
+    println("[IPv4] ${ipv4_hdr.to_string()}")
+    addr_info.ipv4 = ipv4_hdr.src_addr
+
+    if ipv4_hdr.dst_addr.to_string() != nd.my_ip.to_string() {
+        return
+    }
+
+    if ipv4_hdr.protocol == byte(IPv4Protocol.icmp) {
+        icmp_hdr := parse_icmp_hdr(payload) ?
+        nd.handle_icmp(&icmp_hdr, payload[4..], mut addr_info)
+    }
+}
+
+fn (nd NetDevice) handle_icmp(icmp_hdr &IcmpHdr, payload []byte, mut addr_info &AddrInfo) {
+    println("[ICMP] ${icmp_hdr.to_string()}")
+    match icmp_hdr.hdr {
+        IcmpHdrBase {
+        }
+        IcmpHdrEcho {
+            nd.handle_icmp_echo(&icmp_hdr.hdr, payload[4..], mut addr_info)
+        }
+    }
+}
+
+fn (nd NetDevice) handle_icmp_echo(icmp_hdr_echo &IcmpHdrEcho, payload []byte, mut addr_info &AddrInfo) {
+    if icmp_hdr_echo.icmp_type == byte(IcmpType.echo_request) {
+        mut icmp_reply := *icmp_hdr_echo
+        icmp_reply.chksum = 0
+        icmp_reply.icmp_type = byte(IcmpType.echo_reply)
+
+        mut reply_bytes := icmp_reply.to_bytes()
+        reply_bytes << payload
+        icmp_reply.chksum = calc_chksum(reply_bytes)
+
+        mut pkt := Packet {
+            l4_hdr : IcmpHdr {
+                hdr: icmp_reply
+            }
+            payload : payload
+        }
+        nd.send_ipv4(mut &pkt, addr_info)
+    }
+}
+
+fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo) {
+    mut ipv4_hdr := IPv4Hdr {}
+    l4_hdr := &pkt.l4_hdr
+    mut l4_size := 0
+    match l4_hdr {
+        IcmpHdr {
+            l4_size = l4_hdr.len() + pkt.payload.len
+            ipv4_hdr.protocol = byte(IPv4Protocol.icmp)
+        }
+        HdrNone {
+
+        }
+    }
+
+    ipv4_hdr.tos = 0
+    ipv4_hdr.total_len = u16(ipv4_hdr.header_length + l4_size)
+    ipv4_hdr.id = u16(rand.u32() & 0xFFFF)
+    ipv4_hdr.frag_flag = 0
+    ipv4_hdr.frag_offset = 0
+    ipv4_hdr.ttl = 64
+    ipv4_hdr.chksum = 0
+    ipv4_hdr.src_addr = nd.my_ip
+    ipv4_hdr.dst_addr = dst_addr.ipv4
+
+    ipv4_bytes := ipv4_hdr.to_bytes()
+    ipv4_hdr.chksum = calc_chksum(ipv4_bytes)
+
+    pkt.l3_hdr = ipv4_hdr
+
+    nd.send_eth(mut pkt, dst_addr)
+}
+
+fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) {
+    mut eth_hdr := EthHdr{
+        dmac: dst_addr.mac
+        smac: nd.my_mac
+    }
+    match pkt.l3_hdr {
+        ArpHdr {
+            eth_hdr.ether_type = u16(EtherType.arp)
+        }
+        IPv4Hdr {
+            eth_hdr.ether_type = u16(EtherType.ipv4)
+        }
+        HdrNone {
+        }
+    }
+    pkt.l2_hdr = eth_hdr
+
+    nd.send_frame(pkt)
+}
+
+fn (nd NetDevice) send_frame(pkt &Packet) {
     mut buf := [9000]byte{}
     mut size := 0
 
@@ -143,6 +251,9 @@ fn (nd NetDevice) send_frame(pkt Packet) {
             l3_bytes = pkt.l3_hdr.to_bytes()
         }
         IPv4Hdr {
+            l3_bytes = pkt.l3_hdr.to_bytes()
+        }
+        HdrNone {
 
         }
     }
@@ -150,8 +261,29 @@ fn (nd NetDevice) send_frame(pkt Packet) {
     for i := 0; i < l3_bytes.len; i += 1 {
         buf[l3_offset + i] = l3_bytes[i]
     }
-
     size += l3_bytes.len
+
+    l4_offset := size
+    mut l4_bytes := []byte{}
+    match pkt.l4_hdr {
+        IcmpHdr {
+            l4_bytes = pkt.l4_hdr.to_bytes()
+        }
+        HdrNone {
+
+        }
+    }
+
+    for i := 0; i < l4_bytes.len; i += 1 {
+        buf[l4_offset + i] = l4_bytes[i]
+    }
+    size += l4_bytes.len
+
+    payload_offset := size
+    for i := 0; i < pkt.payload.len; i += 1 {
+        buf[payload_offset + i] = pkt.payload[i]
+    }
+    size += pkt.payload.len
     println("SEND FRAME")
     C.write(nd.tap_fd, &buf, size)
 }
@@ -171,7 +303,7 @@ fn main() {
     for true {
         mut buf := [9000]byte{}
         count := C.read(netdev.tap_fd, &buf[0], sizeof(buf))
-        netdev.handle_frame(buf[0..], count) ?
+        netdev.handle_frame(buf[0..count]) ?
     }
 }
 
