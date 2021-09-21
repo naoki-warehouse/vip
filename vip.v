@@ -15,10 +15,10 @@ mut:
     tap_name string
     my_mac PhysicalAddress
     my_ip IPv4Address
-
     arp_table_chans ArpTableChans
-
-    threads []thread
+    threads []thread = []thread{}
+    socks []Socket= []Socket{}
+    sock_chan chan Socket
 }
 
 fn be16(buf []byte) u16 {
@@ -299,11 +299,38 @@ fn main() {
     netdev.print()
 
     netdev.threads << go netdev.arp_table_chans.arp_table_thread()
+    netdev.threads << go netdev.handle_control_usock("/tmp/vip.sock")
+
 
     for true {
-        mut buf := [9000]byte{}
-        count := C.read(netdev.tap_fd, &buf[0], sizeof(buf))
-        netdev.handle_frame(buf[0..count]) ?
+        select {
+            sock := <- netdev.sock_chan {
+                netdev.socks << sock
+                netdev.threads << go sock.handle_data(&netdev)
+            }
+            0 * time.millisecond {
+                // select is not graceful for waiting timeout?
+                set := C.fd_set{}
+                C.FD_ZERO(&set)
+                C.FD_SET(netdev.tap_fd, &set)
+                timeout := C.timeval {
+                    tv_sec: 0
+                    tv_usec: 500 * 1000
+                }
+                err := C.@select(netdev.tap_fd + 1, &set, C.NULL, C.NULL, &timeout)
+                if err < 0 {
+                    panic("error!")
+                }
+                ready := C.FD_ISSET(netdev.tap_fd, &set)
+                if !ready {
+                   continue 
+                }
+
+                mut buf := [9000]byte{}
+                count := C.read(netdev.tap_fd, &buf[0], sizeof(buf))
+                netdev.handle_frame(buf[0..count]) ?
+            }
+        }
     }
 }
 
@@ -323,7 +350,7 @@ fn tap_alloc(tun_dev_name string) ?os.File{
         idx++
     }
 
-    err := C.ioctl(f.fd, C.TUNSETIFF, &ifr)
+    mut err := C.ioctl(f.fd, C.TUNSETIFF, &ifr)
     if err < 0 {
         return error("falied to ioctl")
     }
