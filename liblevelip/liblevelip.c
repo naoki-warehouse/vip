@@ -59,6 +59,7 @@ static inline struct lvlip_sock *lvlip_get_sock(int fd) {
 
 static int is_socket_supported(int domain, int type, int protocol)
 {
+    print_err("domain:%d type:%d protocol:%d\n", domain, type, protocol);
     if (domain != AF_INET) return 0;
 
     if (!(type & SOCK_STREAM)) return 0;
@@ -148,7 +149,7 @@ int socket(int domain, int type, int protocol)
 
     struct lvlip_sock *sock;
     
-    int lvlfd = init_socket("/tmp/lvlip.socket");
+    int lvlfd = init_socket("/tmp/vip.sock");
 
     sock = lvlip_alloc();
     sock->lvlfd = lvlfd;
