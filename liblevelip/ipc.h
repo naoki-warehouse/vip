@@ -2,6 +2,7 @@
 #define IPC_H_
 
 #include "list.h"
+#include "syshead.h"
 
 #ifdef DEBUG_IPC
 #define ipc_dbg(msg, th)                                                \

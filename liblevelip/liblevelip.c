@@ -62,9 +62,9 @@ static int is_socket_supported(int domain, int type, int protocol)
     print_err("domain:%d type:%d protocol:%d\n", domain, type, protocol);
     if (domain != AF_INET) return 0;
 
-    if (!(type & SOCK_STREAM)) return 0;
+    if (type != SOCK_DGRAM) return 0;
 
-    if (protocol != 0 && protocol != IPPROTO_TCP) return 0;
+    if (protocol != IPPROTO_IP && protocol != IPPROTO_ICMP) return 0;
 
     return 1;
 }
@@ -144,7 +144,9 @@ static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
 int socket(int domain, int type, int protocol)
 {
     if (!is_socket_supported(domain, type, protocol)) {
-        return _socket(domain, type, protocol);
+        errno = EAFNOSUPPORT;
+        return -1;
+        //return _socket(domain, type, protocol);
     }
 
     struct lvlip_sock *sock;
@@ -162,6 +164,7 @@ int socket(int domain, int type, int protocol)
     struct ipc_msg *msg = alloca(msglen);
     msg->type = IPC_SOCKET;
     msg->pid = pid;
+    lvl_dbg("type:0x%X pid:%d", msg->type, msg->pid);
 
     struct ipc_socket usersock = {
         .domain = domain,

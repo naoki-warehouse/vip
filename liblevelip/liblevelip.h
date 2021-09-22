@@ -6,6 +6,7 @@
 #include "list.h"
 #include "utils.h"
 
+#define DEBUG_API
 #ifdef DEBUG_API
 #define lvl_dbg(msg, ...)                                               \
     do {                                                                \
