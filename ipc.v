@@ -32,7 +32,7 @@ fn new_socket_chans() SocketChans {
     }
 }
 
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose
 
 struct IpcMsg {
     msg IpcMsgType
@@ -70,6 +70,11 @@ struct IpcMsgSockname {
     socket int
     address_len u32
     data []byte
+}
+
+struct IpcMsgClose {
+    IpcMsgBase
+    sockfd int
 }
 
 fn bytes_to_int(buf []byte) ?int {
@@ -120,6 +125,16 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
                 socket: bytes_to_int(buf[6..10]) ?
                 address_len : bytes_to_u32(buf[10..14]) ?
                 data : buf[14..142]
+            }
+        }
+    }
+
+    if base.msg_type == C.IPC_CLOSE {
+        assert buf.len >= 10
+        return IpcMsg {
+            msg: IpcMsgClose {
+                IpcMsgBase: base
+                sockfd: bytes_to_int(buf[6..10]) ?
             }
         }
     }
@@ -270,8 +285,14 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             IpcMsgSockname {
                 sock.handle_sockname(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
+            IpcMsgClose {
+                sock.handle_close(&msg, mut conn, nd, shared sock_shared) or { continue }
+                break
+            }
         }
     }
+
+    println("[IPC] socket closed")
 }
 
 fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
@@ -383,5 +404,17 @@ fn (shared sock Socket) handle_sockname(msg &IpcMsgSockname, mut ipc_sock unix.S
     }
 
     println("[IPC Sockname] response addr(${sockaddr.to_string()})")
+    ipc_sock.write(res_msg.to_bytes()) ?
+}
+
+fn (shared sock Socket) handle_close(msg &IpcMsgClose, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Close] ${msg.to_string()}")
+    mut res_msg := IpcMsgError {
+        IpcMsgBase : msg.IpcMsgBase
+        rc : 0
+        err : 0
+    }
+
+    println("[IPC Close] close socket(fd:${msg.sockfd}")
     ipc_sock.write(res_msg.to_bytes()) ?
 }
