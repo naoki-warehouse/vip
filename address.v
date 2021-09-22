@@ -79,6 +79,7 @@ mut:
 }
 
 struct SockAddrIn {
+    len int = 16
 mut:
     family u16
     sin_port u16
@@ -123,4 +124,17 @@ fn (addr SockAddrIn) to_string() string {
     s += "sin_port:${addr.sin_port} "
     s += "sin_addr:${addr.sin_addr.to_string()}"
     return s
+}
+
+fn (addr SockAddrIn) to_bytes() []byte {
+    mut buf := []byte{len: addr.len}
+    buf[0] = byte(addr.family)
+    buf[1] = byte(addr.family >> 8)
+    buf[2] = byte(addr.sin_port)
+    buf[3] = byte(addr.sin_port >> 8)
+    for i := 0; i < 4; i += 1 {
+        buf[4+i] = addr.sin_addr.addr[i]
+    }
+
+    return buf
 }

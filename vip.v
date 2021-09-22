@@ -24,6 +24,8 @@ mut:
 struct SocketShared {
 mut:
     fd_base int = 4097
+    udp_port_base u16 = 49152
+    tcp_port_base u16 = 49152
 }
 
 fn be16(buf []byte) u16 {

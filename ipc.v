@@ -32,13 +32,14 @@ fn new_socket_chans() SocketChans {
     }
 }
 
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname
 
 struct IpcMsg {
     msg IpcMsgType
 }
 
 struct IpcMsgBase {
+    len int = 6
     msg_type u16
     pid int
 }
@@ -62,6 +63,13 @@ struct IpcMsgConnect {
     sockfd int
     addr SockAddr
     addrlen u32
+}
+
+struct IpcMsgSockname {
+    IpcMsgBase
+    socket int
+    address_len u32
+    data []byte
 }
 
 fn bytes_to_int(buf []byte) ?int {
@@ -104,6 +112,18 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
     }
 
+    if base.msg_type == C.IPC_GETSOCKNAME {
+        assert buf.len >= 142
+        return IpcMsg {
+            msg: IpcMsgSockname {
+                IpcMsgBase: base
+                socket: bytes_to_int(buf[6..10]) ?
+                address_len : bytes_to_u32(buf[10..14]) ?
+                data : buf[14..142]
+            }
+        }
+    }
+
     return IpcMsg {
         msg : base
     }
@@ -137,6 +157,30 @@ fn (im IpcMsgError) to_bytes() []byte {
     base_bytes << im.data
 
     return base_bytes
+}
+
+fn (im IpcMsgSockname) to_bytes() []byte {
+    mut base_bytes := im.IpcMsgBase.to_bytes()
+    mut buf := []byte{len: 136}
+    buf[0] = byte(im.socket)
+    buf[1] = byte(im.socket >> 8)
+    buf[2] = byte(im.socket >> 16)
+    buf[3] = byte(im.socket >> 24)
+    buf[4] = byte(im.address_len)
+    buf[5] = byte(im.address_len >> 8)
+    buf[6] = byte(im.address_len >> 16)
+    buf[7] = byte(im.address_len >> 24)
+
+    mut data_size := im.data.len
+    if data_size >= 128 {
+        data_size = 128
+    }
+    for i := 0; i < data_size; i += 1 {
+        buf[i+8] = im.data[i]
+    }
+
+    base_bytes << buf
+    return  base_bytes
 }
 
 fn (im IpcMsgBase) to_string() string {
@@ -223,6 +267,9 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             IpcMsgConnect {
                 sock.handle_connect(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
+            IpcMsgSockname {
+                sock.handle_sockname(&msg, mut conn, nd, shared sock_shared) or { continue }
+            }
         }
     }
 }
@@ -231,9 +278,12 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
     println("[IPC Socket] ${msg.to_string()}")
 
     mut fd := 0
+    mut port := u16(0)
     lock sock_shared {
         fd = sock_shared.fd_base
+        port = sock_shared.udp_port_base
         sock_shared.fd_base += 1
+        sock_shared.udp_port_base += 1
     }
 
     lock sock {
@@ -242,6 +292,7 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
         sock.domain = msg.domain
         sock.sock_type = msg.sock_type
         sock.protocol = msg.protocol
+        sock.port = port
     }
 
     res_msg := IpcMsgError {
@@ -277,7 +328,11 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
     }
 
     mut success := true
-    nd.send_udp(mut pkt, &dst_addr, addr.sin_port) or { success = false }
+    mut port := u16(0)
+    lock sock {
+        port = sock.port
+    }
+    nd.send_udp(mut pkt, &dst_addr, port) or { success = false }
 
     if !success {
         res_msg := IpcMsgError {
@@ -296,4 +351,37 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
         ipc_sock.write(res_msg.to_bytes()) ?
     }
 
+}
+
+fn (shared sock Socket) handle_sockname(msg &IpcMsgSockname, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Sockname] ${msg.to_string()}")
+
+    if msg.msg_type != C.IPC_GETSOCKNAME {
+        return
+    }
+
+    mut sockaddr := SockAddrIn {
+        family: u16(C.AF_INET)
+        sin_addr: nd.my_ip
+    }
+    lock sock {
+        sockaddr.sin_port = sock.port
+    }
+
+    mut res_sockname := IpcMsgSockname {
+        IpcMsgBase : msg.IpcMsgBase
+        socket: msg.socket
+        address_len : u32(sockaddr.len)
+        data: sockaddr.to_bytes()
+    }
+
+    mut res_msg := IpcMsgError {
+        IpcMsgBase : msg.IpcMsgBase
+        rc : 0
+        err : 0
+        data : res_sockname.to_bytes()[msg.IpcMsgBase.len..]
+    }
+
+    println("[IPC Sockname] response addr(${sockaddr.to_string()})")
+    ipc_sock.write(res_msg.to_bytes()) ?
 }
