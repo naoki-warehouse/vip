@@ -292,6 +292,7 @@ fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
             if arp_try_num == 10 {
                 return error("failed to resolve ${l3_hdr.dst_addr.to_string()}")
             }
+            eth_hdr.dmac = dmac_rev.mac
             eth_hdr.ether_type = u16(EtherType.ipv4)
         }
         HdrNone {

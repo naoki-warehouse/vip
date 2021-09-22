@@ -32,7 +32,7 @@ fn new_socket_chans() SocketChans {
     }
 }
 
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto
 
 struct IpcMsg {
     msg IpcMsgType
@@ -53,6 +53,7 @@ struct IpcMsgSocket {
 
 struct IpcMsgError {
     IpcMsgBase
+mut:
     rc int
     err int
     data []byte
@@ -87,6 +88,25 @@ mut:
     optval []byte
 }
 
+struct IpcMsgWrite {
+    IpcMsgBase
+    sockfd int
+    len u64
+mut:
+    buf []byte
+}
+
+struct IpcMsgSendto {
+    IpcMsgBase
+    sockfd int
+    flags int
+    addrlen u32
+mut:
+    addr SockAddr
+    len u64
+    buf []byte
+}
+
 fn bytes_to_int(buf []byte) ?int {
     assert buf.len == 4
     return buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
@@ -95,6 +115,13 @@ fn bytes_to_int(buf []byte) ?int {
 fn bytes_to_u32(buf []byte) ?u32 {
     assert buf.len == 4
     return buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
+}
+
+fn bytes_to_u64(buf []byte) ?u64 {
+    assert buf.len == 8
+    mut tmp := buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
+    tmp |= buf[4] << 32 | buf[5] << 40 | buf[6] << 48 | buf[7] << 56
+    return tmp
 }
 
 fn parse_ipc_msg(buf []byte) ?IpcMsg {
@@ -160,6 +187,36 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
                 optlen: bytes_to_u32(buf[18..22]) ?
                 optval: buf[22..]
             }
+        }
+    }
+
+    if base.msg_type == C.IPC_WRITE {
+        assert buf.len >= 14
+        mut msg := IpcMsgWrite {
+            IpcMsgBase : base
+            sockfd : bytes_to_int(buf[6..10]) ?
+            len : bytes_to_u64(buf[10..18]) ?
+        }
+        msg.buf = buf[18..18 + msg.len]
+        return IpcMsg {
+            msg : msg
+        }
+    }
+
+    if base.msg_type == C.IPC_SENDTO {
+        mut msg := IpcMsgSendto {
+            IpcMsgBase : base
+            sockfd : bytes_to_int(buf[6..10]) ?
+            flags : bytes_to_int(buf[10..14]) ?
+            addrlen : bytes_to_u32(buf[14..18]) ?
+        }
+        msg.addr = parse_sockaddr(buf[18..18 + int(msg.addrlen)]) ?
+        mut offset := 18 + int(msg.addrlen)
+        msg.len = bytes_to_u64(buf[offset..offset+8]) ?
+        offset += 8
+        msg.buf = buf[offset..u64(offset) + msg.len]
+        return IpcMsg {
+            msg: msg
         }
     }
 
@@ -289,6 +346,25 @@ fn (im IpcMsgSockopt) to_string() string {
     return s
 }
 
+fn (im IpcMsgWrite) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "sockfd:${im.sockfd} "
+    s += "len:${im.len}"
+
+    return s
+}
+
+fn (im IpcMsgSendto) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "sockfd:${im.sockfd} "
+    s += "flags:${im.flags} "
+    s += "addrlen:${im.addrlen} "
+    s += "addr:${im.addr.to_string()} "
+    s += "len:${im.len}"
+
+    return s
+}
+
 fn (nd NetDevice) handle_control_usock(usock_path string) {
     mut l := unix.listen_stream(usock_path) or { panic(err) }
     for {
@@ -371,6 +447,12 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             }
             IpcMsgSockopt {
                 sock.handle_sockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
+            }
+            IpcMsgWrite {
+                sock.handle_write(&msg, mut conn, nd, shared sock_shared) or { continue }
+            }
+            IpcMsgSendto {
+                sock.handle_sendto(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
         }
     }
@@ -536,5 +618,62 @@ fn (shared sock Socket) handle_sockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Str
         }
         println("[IPC Sockopt] not supported option ${msg.to_string()}")
         ipc_sock.write(res_msg.to_bytes()) ?
+    }
+}
+
+fn (shared sock Socket) handle_write(msg &IpcMsgWrite, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Write] ${msg.to_string()}")
+}
+
+fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Sendto] ${msg.to_string()}")
+
+    mut domain := 0
+    mut sock_type := 0
+    mut protocol := 0
+    lock sock {
+        domain = sock.domain
+        sock_type = sock.sock_type
+        protocol = sock.protocol
+    }
+
+    if domain == C.AF_INET &&
+       sock_type == C.SOCK_DGRAM &&
+       protocol == C.IPPROTO_ICMP {
+        mut pkt := Packet{}
+        parse_icmp_packet(mut pkt, msg.buf) ?
+        println(pkt.l4_hdr.to_string())
+        println("[IPC Sendto] Send From IPv4 Layer")
+        mut addr := SockAddrIn{}
+        match msg.addr.addr {
+            SockAddrBase {
+
+            }
+            SockAddrIn {
+                addr = msg.addr.addr
+            }
+        }
+        dest_addr := AddrInfo {
+            ipv4: addr.sin_addr
+        }
+
+        mut success := false
+        nd.send_ipv4(mut pkt, dest_addr) or { success = false }
+
+        mut res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : 0
+            err : 0
+        }
+        if !success {
+            res_msg.rc = -1
+            // is this ok ?
+            res_msg.err = C.EBADF
+            println("[IPC Connect] sendto failed")
+            ipc_sock.write(res_msg.to_bytes()) ?
+        } else {
+            println("[IPC Sendto] sendto success")
+            ipc_sock.write(res_msg.to_bytes()) ?
+        }
     }
 }

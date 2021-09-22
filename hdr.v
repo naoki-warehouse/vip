@@ -41,3 +41,45 @@ fn (ph PseudoHdr) to_bytes() []byte {
 
     return buf
 }
+
+fn parse_ipv4_packet(mut pkt Packet, buf []byte) ? {
+    ipv4_hdr := parse_ipv4_hdr(buf) ?
+    pkt.l3_hdr = ipv4_hdr
+    if ipv4_hdr.protocol == byte(IPv4Protocol.icmp) {
+        parse_icmp_hdr(buf[int(ipv4_hdr.header_length)..]) ?
+    }
+}
+
+fn parse_icmp_packet(mut pkt Packet, buf []byte) ? {
+    icmp_hdr := parse_icmp_hdr(buf) ?
+    pkt.l4_hdr = icmp_hdr
+    pkt.payload = buf[icmp_hdr.len()..]
+}
+
+fn (l3_hdr &L3Hdr) to_string() string {
+    match l3_hdr {
+        IPv4Hdr {
+            return l3_hdr.to_string()
+        }
+        ArpHdr {
+            return l3_hdr.to_string()
+        }
+        HdrNone {
+            return ""
+        }
+    }
+}
+
+fn (l4_hdr &L4Hdr) to_string() string {
+    match l4_hdr {
+        IcmpHdr{
+            return l4_hdr.to_string()
+        }
+        UdpHdr {
+            return ""
+        }
+        HdrNone {
+            return ""
+        }
+    }
+}
