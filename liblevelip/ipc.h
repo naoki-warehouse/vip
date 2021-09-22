@@ -27,6 +27,7 @@ void *start_ipc_listener();
 #define IPC_SETSOCKOPT  0x0009
 #define IPC_GETPEERNAME 0x000A
 #define IPC_GETSOCKNAME 0x000B
+#define IPC_SENDTO      0x000C
 
 struct ipc_thread {
     struct list_head list;
@@ -60,13 +61,22 @@ struct ipc_connect {
 
 struct ipc_write {
     int sockfd;
-    size_t len;
+    uint64_t len;
+    uint8_t buf[];
+} __attribute__((packed));
+
+struct ipc_sendto {
+    int sockfd;
+    int flags;
+    socklen_t addrlen;
+    struct sockaddr addr;
+    uint64_t len;
     uint8_t buf[];
 } __attribute__((packed));
 
 struct ipc_read {
     int sockfd;
-    size_t len;
+    uint64_t len;
     uint8_t buf[];
 } __attribute__((packed));
 

@@ -349,10 +349,32 @@ ssize_t sendto(int fd, const void *buf, size_t len,
                int flags, const struct sockaddr *dest_addr,
                socklen_t dest_len)
 {
-    if (!lvlip_get_sock(fd)) return _sendto(fd, buf, len,
-                                        flags, dest_addr, dest_len);
+    struct lvlip_sock *sock = lvlip_get_sock(fd);
+    if (sock == NULL) {
+        /* No lvl-ip IPC socket associated */
+        _sendto(fd, buf, len, flags, dest_addr, dest_len);
+    }
 
-    return write(fd, buf, len);
+    lvl_sock_dbg("Sendto called", sock);
+    int msglen = sizeof(struct ipc_msg) + sizeof(struct ipc_sendto) + len;
+    int pid = getpid();
+
+    struct ipc_msg *msg = alloca(msglen);
+    msg->type = IPC_SENDTO;
+    msg->pid = pid;
+
+    struct ipc_sendto payload = {
+        .sockfd = fd,
+        .flags = flags,
+        .addr = *dest_addr,
+        .addrlen = dest_len,
+        .len = len
+    };
+
+    memcpy(msg->data, &payload, sizeof(struct ipc_sendto));
+    memcpy(((struct ipc_sendto *)msg->data)->buf, buf, len);
+
+    return transmit_lvlip(sock->lvlfd, msg, msglen);
 }
 
 ssize_t recv(int fd, void *buf, size_t len, int flags)
