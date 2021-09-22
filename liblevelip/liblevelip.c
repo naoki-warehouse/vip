@@ -392,6 +392,18 @@ ssize_t recvfrom(int fd, void *restrict buf, size_t len,
     return read(fd, buf, len);
 }
 
+ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
+{
+    struct lvlip_sock *sock = lvlip_get_sock(fd);
+    if (sock == NULL) {
+        /* No lvl-ip IPC socket associated */
+        return 0;
+    }
+
+    lvl_sock_dbg("Recvmsg called", sock);
+    return 0;
+}
+
 int poll(struct pollfd *fds, nfds_t nfds, int timeout)
 {
     struct pollfd *kernel_fds[nfds];

@@ -657,7 +657,7 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
             ipv4: addr.sin_addr
         }
 
-        mut success := false
+        mut success := true
         nd.send_ipv4(mut pkt, dest_addr) or { success = false }
 
         mut res_msg := IpcMsgError {
@@ -669,9 +669,10 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
             res_msg.rc = -1
             // is this ok ?
             res_msg.err = C.EBADF
-            println("[IPC Connect] sendto failed")
+            println("[IPC Sendto] sendto failed")
             ipc_sock.write(res_msg.to_bytes()) ?
         } else {
+            res_msg.rc = int(msg.len)
             println("[IPC Sendto] sendto success")
             ipc_sock.write(res_msg.to_bytes()) ?
         }
