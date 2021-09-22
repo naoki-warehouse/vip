@@ -32,7 +32,7 @@ fn new_socket_chans() SocketChans {
     }
 }
 
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt
 
 struct IpcMsg {
     msg IpcMsgType
@@ -75,6 +75,16 @@ struct IpcMsgSockname {
 struct IpcMsgClose {
     IpcMsgBase
     sockfd int
+}
+
+struct IpcMsgSockopt {
+    IpcMsgBase
+    fd int
+    level int
+    optname int
+    optlen u32
+mut:
+    optval []byte
 }
 
 fn bytes_to_int(buf []byte) ?int {
@@ -139,6 +149,20 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
     }
 
+    if base.msg_type == C.IPC_GETSOCKOPT {
+        assert buf.len >= 22
+        return IpcMsg {
+            msg: IpcMsgSockopt{
+                IpcMsgBase: base
+                fd: bytes_to_int(buf[6..10]) ?
+                level: bytes_to_int(buf[10..14]) ?
+                optname: bytes_to_int(buf[14..18]) ?
+                optlen: bytes_to_u32(buf[18..22]) ?
+                optval: buf[22..]
+            }
+        }
+    }
+
     return IpcMsg {
         msg : base
     }
@@ -198,6 +222,38 @@ fn (im IpcMsgSockname) to_bytes() []byte {
     return  base_bytes
 }
 
+fn (im IpcMsgSockopt) to_bytes() []byte {
+    mut base_bytes := im.IpcMsgBase.to_bytes()
+    mut buf := []byte{len:16 + int(im.optlen)}
+    buf[0] = byte(im.fd)
+    buf[1] = byte(im.fd >> 8)
+    buf[2] = byte(im.fd >> 16)
+    buf[3] = byte(im.fd >> 24)
+    buf[4] = byte(im.level)
+    buf[5] = byte(im.level >> 8)
+    buf[6] = byte(im.level >> 16)
+    buf[7] = byte(im.level >> 24)
+    buf[8] = byte(im.optname)
+    buf[9] = byte(im.optname >> 8)
+    buf[10] = byte(im.optname >> 16)
+    buf[11] = byte(im.optname >> 24)
+    buf[12] = byte(im.optlen)
+    buf[13] = byte(im.optlen >> 8)
+    buf[14] = byte(im.optlen >> 16)
+    buf[15] = byte(im.optlen >> 24)
+
+    mut data_size := im.optval.len
+    if data_size > im.optlen {
+        data_size = int(im.optlen)
+    }
+    for i := 0; i < data_size; i += 1 {
+        buf[i+16] = im.optval[i]
+    }
+
+    base_bytes << buf
+    return base_bytes
+}
+
 fn (im IpcMsgBase) to_string() string {
     mut s := "type:0x${im.msg_type:04X} "
     s += "pid:${im.pid}"
@@ -219,6 +275,16 @@ fn (im IpcMsgConnect) to_string() string {
     s += "sockfd:${im.sockfd} "
     s += "addr:${im.addr.to_string()} "
     s += "addrlen:${im.addrlen}"
+
+    return s
+}
+
+fn (im IpcMsgSockopt) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "fd:${im.fd} "
+    s += "level:${level_to_string(im.level)} "
+    s += "optname:${optname_to_string(im.optname)} "
+    s += "optlen:${im.optlen} "
 
     return s
 }
@@ -258,13 +324,27 @@ fn protocol_to_string(protocol int) string {
     return "$protocol"
 }
 
+fn level_to_string(level int) string {
+    if level == C.SOL_SOCKET {
+        return "SOL_SOCKET"
+    }
+    return "$level"
+}
+
+fn optname_to_string(opt int) string {
+    if opt == C.SO_RCVBUF {
+        return "SO_RCVBUF"
+    }
+    return "$opt"
+}
+
 fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared sock_shared SocketShared) {
     mut conn := ipc_sock.stream
     for {
         mut buf := []byte{len: 8192, init: 0}
         count := conn.read(mut buf) or {
             println('Server: connection drppped')
-            return
+            break
         }
         if count <= 0 {
             continue
@@ -288,6 +368,9 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             IpcMsgClose {
                 sock.handle_close(&msg, mut conn, nd, shared sock_shared) or { continue }
                 break
+            }
+            IpcMsgSockopt {
+                sock.handle_sockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
         }
     }
@@ -417,4 +500,41 @@ fn (shared sock Socket) handle_close(msg &IpcMsgClose, mut ipc_sock unix.StreamC
 
     println("[IPC Close] close socket(fd:${msg.sockfd}")
     ipc_sock.write(res_msg.to_bytes()) ?
+}
+
+fn (shared sock Socket) handle_sockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Sockopt] ${msg.to_string()}")
+
+    mut res_sockopt := IpcMsgSockopt {
+        IpcMsgBase : msg.IpcMsgBase
+        fd : msg.fd
+        level : msg.level
+        optname : msg.optname
+        optlen : msg.optlen
+    }
+    if msg.optname == C.SO_RCVBUF {
+        rcv_buf_size  := 128 * 1024
+        mut optval := []byte{len:4}
+        optval[0] = byte(rcv_buf_size)
+        optval[1] = byte(rcv_buf_size >> 8)
+        optval[2] = byte(rcv_buf_size >> 16)
+        optval[3] = byte(rcv_buf_size >> 24)
+        res_sockopt.optval = optval
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : 0
+            err : 0
+            data : res_sockopt.to_bytes()[msg.IpcMsgBase.len..]
+        }
+        println("[IPC Sockopt] SO_RCVBUF: $rcv_buf_size")
+        ipc_sock.write(res_msg.to_bytes()) ?
+    } else {
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : -1
+            err : C.ENOPROTOOPT
+        }
+        println("[IPC Sockopt] not supported option ${msg.to_string()}")
+        ipc_sock.write(res_msg.to_bytes()) ?
+    }
 }
