@@ -21,18 +21,16 @@ mut:
 }
 
 struct SocketChans {
-    write_chan chan []byte
-    read_chan chan []byte
+    read_chan chan Packet
 }
 
 fn new_socket_chans() SocketChans {
     return SocketChans {
-        write_chan : chan []byte{}
-        read_chan : chan []byte{}
+        read_chan : chan Packet{cap: 10}
     }
 }
 
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg
 
 struct IpcMsg {
     msg IpcMsgType
@@ -107,6 +105,21 @@ mut:
     buf []byte
 }
 
+struct IpcMsgRecvmsg {
+    IpcMsgBase
+    sockfd int
+    flags int
+    msg_flags int
+    msg_namelen u32
+    msg_controllen u64
+    msg_iovlen u64
+mut:
+    msg_iovs_len []u64
+    addr SockAddr
+    recvmsg_cmsghdr []byte
+    iov_data [][]byte
+}
+
 fn bytes_to_int(buf []byte) ?int {
     assert buf.len == 4
     return buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
@@ -119,7 +132,8 @@ fn bytes_to_u32(buf []byte) ?u32 {
 
 fn bytes_to_u64(buf []byte) ?u64 {
     assert buf.len == 8
-    mut tmp := buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
+    mut tmp := u64(0)
+    tmp |= buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
     tmp |= buf[4] << 32 | buf[5] << 40 | buf[6] << 48 | buf[7] << 56
     return tmp
 }
@@ -130,6 +144,7 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         msg_type : buf[0] | buf[1] << 8
         pid : bytes_to_int(buf[2..6]) ?
     }
+    println("PARSED msg_type:${base.msg_type:04X}")
 
     if base.msg_type == C.IPC_SOCKET {
         assert buf.len >= 18
@@ -215,6 +230,24 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         msg.len = bytes_to_u64(buf[offset..offset+8]) ?
         offset += 8
         msg.buf = buf[offset..u64(offset) + msg.len]
+        return IpcMsg {
+            msg: msg
+        }
+    }
+
+    if base.msg_type == C.IPC_RECVMSG {
+        mut msg := IpcMsgRecvmsg {
+            IpcMsgBase : base
+            sockfd : bytes_to_int(buf[6..10]) ?
+            flags : bytes_to_int(buf[10..14]) ?
+            msg_flags : bytes_to_int(buf[14..18]) ?
+            msg_namelen : bytes_to_u32(buf[18..22]) ?
+            msg_controllen : bytes_to_u64(buf[22..30]) ?
+            msg_iovlen : bytes_to_u64(buf[30..38]) ?
+        }
+        for i := 0; i < msg.msg_iovlen; i += 1 {
+            msg.msg_iovs_len << bytes_to_u64(buf[38 + i*8..46 + i*8]) ?
+        }
         return IpcMsg {
             msg: msg
         }
@@ -311,6 +344,78 @@ fn (im IpcMsgSockopt) to_bytes() []byte {
     return base_bytes
 }
 
+fn (im IpcMsgRecvmsg) to_bytes() ?[]byte {
+    mut base_bytes := im.IpcMsgBase.to_bytes()
+    mut iov_len_sum := u64(0)
+    for iov_len in im.msg_iovs_len {
+        iov_len_sum += iov_len
+    }
+
+    mut buf := []byte{len:32 + int(im.msg_iovs_len.len*8) + int(im.msg_namelen) + int(im.msg_controllen) + int(iov_len_sum)}
+    for i := 0; i < 4; i += 1 {
+        buf[i] = byte(im.sockfd >> i*8)
+    }
+    for i := 0; i < 4; i += 1 {
+        buf[i+4] = byte(im.flags >> i*8)
+    }
+    for i := 0; i < 4; i += 1 {
+        buf[i+8] = byte(im.msg_flags >> i*8)
+    }
+    for i := 0; i < 4; i += 1 {
+        buf[i+12] = byte(im.msg_namelen >> i*8)
+    }
+    for i := 0; i < 8; i += 1 {
+        buf[i+16] = byte(im.msg_controllen >> i*8)
+    }
+    for i := 0; i < 8; i += 1 {
+        buf[i+24] = byte(im.msg_iovlen >> i*8)
+    }
+    for j := 0; j < im.msg_iovs_len.len; j += 1 {
+        for i := 0; i < 8; i += 1 {
+            buf[32+j*8+i] = byte(im.msg_iovs_len[j] >> i*8)
+        }
+    }
+    mut offset := 32 + im.msg_iovs_len.len*8
+    sockaddr := im.addr.addr
+    match sockaddr {
+        SockAddrIn {
+            sockaddr_bytes := sockaddr.to_bytes()
+            assert sockaddr_bytes.len == 16
+            for i := 0; i < 16; i += 1 {
+                buf[offset+i] = sockaddr_bytes[i]
+            }
+            offset += int(im.msg_namelen)
+        }
+        else { return error("not expected sockaddr")}
+    }
+    mut cmsghdr_size := im.recvmsg_cmsghdr.len
+    if cmsghdr_size > im.msg_controllen {
+        cmsghdr_size = int(im.msg_controllen)
+    }
+    for i := 0; i < cmsghdr_size; i += 1 {
+        buf[offset+i] = im.recvmsg_cmsghdr[i]
+    }
+    offset += int(im.msg_controllen)
+    mut iov_num := im.iov_data.len
+    if iov_num > im.msg_iovlen {
+        iov_num = int(im.msg_iovlen)
+    }
+    for j := 0; j < iov_num; j += 1 {
+        iov_buf := im.iov_data[j]
+        mut iov_buf_len := iov_buf.len
+        if iov_buf_len > im.msg_iovs_len[j] {
+            iov_buf_len = int(im.msg_iovs_len[j])
+        }
+        for i := 0; i < iov_buf_len; i += 1 {
+            buf[offset+i] = iov_buf[i]
+        }
+        offset += int(im.msg_iovs_len[j])
+    }
+
+    base_bytes << buf
+    return base_bytes
+}
+
 fn (im IpcMsgBase) to_string() string {
     mut s := "type:0x${im.msg_type:04X} "
     s += "pid:${im.pid}"
@@ -361,6 +466,19 @@ fn (im IpcMsgSendto) to_string() string {
     s += "addrlen:${im.addrlen} "
     s += "addr:${im.addr.to_string()} "
     s += "len:${im.len}"
+
+    return s
+}
+
+fn (im IpcMsgRecvmsg) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "sockfd:${im.sockfd} "
+    s += "flags:${im.flags} "
+    s += "msg_flags:${im.msg_flags} "
+    s += "msg_namelen:${im.msg_namelen} "
+    s += "msg_controllen:${im.msg_controllen} "
+    s += "msg_iovlen:${im.msg_iovlen} "
+    s += "msg:iovs_len:${im.msg_iovs_len}"
 
     return s
 }
@@ -454,6 +572,9 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             IpcMsgSendto {
                 sock.handle_sendto(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
+            IpcMsgRecvmsg {
+                sock.handle_recvmsg(&msg, mut conn, nd, shared sock_shared) or { continue }
+            }
         }
     }
 
@@ -495,22 +616,14 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
 fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
     println("[IPC Connect] ${msg.to_string()}")
 
-    mut addr := SockAddrIn{}
-    match msg.addr.addr {
-        SockAddrBase {
-
-        }
-        SockAddrIn {
-            addr = msg.addr.addr
-        }
-    }
     mut pkt := Packet {
         payload : []byte{len:100}
     }
 
     dst_addr := AddrInfo {
-        ipv4: addr.sin_addr
-        port: addr.sin_port
+        mac: nd.my_mac
+        ipv4: nd.my_ip
+        port: sock.port
     }
 
     mut success := true
@@ -677,4 +790,39 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
             ipc_sock.write(res_msg.to_bytes()) ?
         }
     }
+}
+
+fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Recvmsg] ${msg.to_string()}")
+
+    mut pkt := Packet{}
+    lock sock {
+        pkt = <- sock.sock_chans.read_chan
+    }
+    buf := pkt.payload
+
+    mut res := *msg
+    res.iov_data << buf
+    l3_hdr := pkt.l3_hdr
+    match l3_hdr {
+        IPv4Hdr {
+            res.addr = SockAddr {
+                addr : SockAddrIn {
+                    sin_addr : l3_hdr.src_addr
+                }
+            }
+        }
+        else {}
+    }
+
+    mut res_msg := IpcMsgError {
+        IpcMsgBase : msg.IpcMsgBase
+        rc : buf.len
+        err : 0
+        data : res.to_bytes()?[msg.IpcMsgBase.len..]
+    }
+
+    res_msg_bytes := res_msg.to_bytes()
+    println("[IPC Recvmsg] recvmsg success(size:${res_msg_bytes.len})")
+    ipc_sock.write(res_msg_bytes) ?
 }

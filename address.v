@@ -81,7 +81,7 @@ mut:
 struct SockAddrIn {
     len int = 16
 mut:
-    family u16
+    family u16 = u16(C.AF_INET)
     sin_port u16
     sin_addr IPv4Address 
 }
