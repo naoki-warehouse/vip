@@ -28,6 +28,7 @@ void *start_ipc_listener();
 #define IPC_GETPEERNAME 0x000A
 #define IPC_GETSOCKNAME 0x000B
 #define IPC_SENDTO      0x000C
+#define IPC_RECVMSG     0x000D
 
 struct ipc_thread {
     struct list_head list;
@@ -78,6 +79,27 @@ struct ipc_read {
     int sockfd;
     uint64_t len;
     uint8_t buf[];
+} __attribute__((packed));
+
+struct ipc_recvmsg {
+    int sockfd;
+    int flags;
+    int msg_flags;
+    uint32_t msg_namelen;
+    uint64_t msg_controllen;
+    uint64_t msg_iovlen;
+    uint8_t data[];
+    // uint64_t msg_iovs_len[];
+    // uint8_t msg_name[]
+    // struct recvmsg_cmsghdr[] 
+    // uint8_t *iov_base[]
+} __attribute__((packed));
+
+struct recvmsg_cmsghdr {
+    uint64_t cmsg_len;
+    int cmsg_level;
+    int cmsg_type;
+    uint8_t cmsg_data[];
 } __attribute__((packed));
 
 struct ipc_close {

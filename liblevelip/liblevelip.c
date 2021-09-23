@@ -397,11 +397,94 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
     struct lvlip_sock *sock = lvlip_get_sock(fd);
     if (sock == NULL) {
         /* No lvl-ip IPC socket associated */
-        return 0;
+        return -1;
     }
 
     lvl_sock_dbg("Recvmsg called", sock);
-    return 0;
+
+    int pid = getpid();
+    int msglen = sizeof(struct ipc_msg) + sizeof(struct ipc_recvmsg) + msg->msg_iovlen*sizeof(uint64_t);
+
+    struct ipc_msg *ipc_msg = alloca(msglen);
+    ipc_msg->type = IPC_RECVMSG;
+    ipc_msg->pid = pid;
+
+    struct ipc_recvmsg payload = {
+        .sockfd = fd,
+        .flags = flags,
+        .msg_namelen = msg->msg_namelen,
+        .msg_controllen = msg->msg_controllen,
+        .msg_iovlen = msg->msg_iovlen,
+    };
+
+    uint64_t *msg_iovs_len = (uint64_t *) payload.data;
+    lvl_dbg("flags:%d msg_namelen:%d msg_controllen:%lu msg_iovlen:%lu ", 
+        payload.flags, payload.msg_namelen, payload.msg_controllen, payload.msg_iovlen);
+    for (int i = 0; i < msg->msg_iovlen; i++) {
+        msg_iovs_len[i] = msg->msg_iov[i].iov_len;
+        lvl_dbg("msg_iov[%d].iov_len:%lu ", i, msg_iovs_len[i]);
+    }
+
+    memcpy(ipc_msg->data, &payload, sizeof(struct ipc_recvmsg) + msg->msg_iovlen*sizeof(uint64_t));
+
+    // Send mocked syscall to lvl-ip
+    if (_write(sock->lvlfd, (char *)ipc_msg, msglen) == -1) {
+        perror("Error on writing IPC read");
+    }
+    print_err("write")
+
+    int rlen = sizeof(struct ipc_msg) + sizeof(struct ipc_err) + sizeof(struct ipc_recvmsg);
+    rlen += msg->msg_iovlen*sizeof(uint64_t) + msg->msg_namelen + msg->msg_controllen;
+    for(int i = 0; i < msg->msg_iovlen; i++)
+    {
+        rlen += msg->msg_iov[i].iov_len;
+    }
+    char rbuf[rlen];
+    memset(rbuf, 0, rlen);
+
+    // Read return value from lvl-ip
+    if (_read(sock->lvlfd, rbuf, rlen) == -1) {
+        perror("Could not read IPC read response");
+    }
+    lvl_dbg("ipc recv size:%d", rlen);
+    
+    struct ipc_msg *response = (struct ipc_msg *) rbuf;
+
+    if (response->type != IPC_RECVMSG || response->pid != pid) {
+        print_err("ERR: IPC recvmsg response expected: type %d, pid %d\n"
+                  "                       actual: type %d, pid %d\n",
+               IPC_RECVMSG, pid, response->type, response->pid);
+        return -1;
+    }
+
+    struct ipc_err *error = (struct ipc_err *) response->data;
+    if (error->rc < 0) {
+        errno = error->err;
+        return error->rc;
+    }
+
+    struct ipc_recvmsg *data = (struct ipc_recvmsg *) error->data;
+    lvl_dbg("sockfd:%d flags:%d msg_flags:%d msg_namelen:%d msg_controllen:%lu msg_iovlen:%lu", 
+    data->sockfd, data->flags, data->msg_flags, data->msg_namelen, data->msg_controllen, data->msg_iovlen);
+    // data->data : uint64_t msg_iovs_len[]
+    uint8_t *offset = data->data;
+
+    // uint8_t msg_name
+    offset += sizeof(uint64_t) * data->msg_iovlen;
+    memcpy(msg->msg_name, offset, msg->msg_namelen);
+
+    // struct recvmsg_cmsghdr
+    offset += data->msg_namelen;
+    memcpy(msg->msg_control, offset, msg->msg_controllen);
+
+    // uint8_t *iov_base[]
+    offset += data->msg_controllen;
+    for(int i = 0; i < msg->msg_iovlen; i++) {
+        memcpy(msg->msg_iov[i].iov_base, offset, msg->msg_iov[i].iov_len);
+        offset += msg->msg_iov[i].iov_len;
+    }
+
+    return error->rc;
 }
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout)
