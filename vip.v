@@ -148,6 +148,7 @@ fn (nd NetDevice) handle_ipv4(ipv4_hdr &IPv4Hdr, payload []byte, mut addr_info &
     if ipv4_hdr.protocol == byte(IPv4Protocol.icmp) {
         for i := 0; i < nd.socks.len; i += 1 {
             shared sock := nd.socks[i]
+            println("[IPv4] handling ICMP")
             lock sock {
                 if sock.domain == C.AF_INET && 
                    sock.sock_type == C.SOCK_DGRAM &&
@@ -156,13 +157,16 @@ fn (nd NetDevice) handle_ipv4(ipv4_hdr &IPv4Hdr, payload []byte, mut addr_info &
                            l3_hdr : ipv4_hdr
                            payload: payload
                        }
+                       println("[IPv4] handling sock(fd:${sock.fd}")
                        res := sock.sock_chans.read_chan.try_push(pkt)
                        println("[IPv4] handle sock(payload_len:${payload.len})")
+                       println("[IPv4] sock_chans.read_chan.len${sock.sock_chans.read_chan.len}")
                        if res != .success {
                            println("[IPv4] failed to push read_chan(fd:${sock.fd})")
                        }
                    }
             }
+            println("[IPv4] handled ICMP done")
         }
         icmp_hdr := parse_icmp_hdr(payload) ?
         nd.handle_icmp(&icmp_hdr, payload[4..], mut addr_info)

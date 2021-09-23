@@ -1,5 +1,6 @@
 module main
 
+import time
 import net.unix
 
 #include "@VMODROOT/liblevelip/ipc.h"
@@ -30,7 +31,7 @@ fn new_socket_chans() SocketChans {
     }
 }
 
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgPoll
 
 struct IpcMsg {
     msg IpcMsgType
@@ -110,14 +111,34 @@ struct IpcMsgRecvmsg {
     sockfd int
     flags int
     msg_flags int
-    msg_namelen u32
     msg_controllen u64
     msg_iovlen u64
 mut:
+    msg_namelen u32
     msg_iovs_len []u64
     addr SockAddr
     recvmsg_cmsghdr []byte
     iov_data [][]byte
+}
+
+struct IpcMsgPollfd {
+    fd int
+    events u16
+mut:
+    revents u16
+}
+
+struct IpcMsgPoll {
+    IpcMsgBase
+    nfds u64
+    timeout int
+mut:
+    fds []IpcMsgPollfd
+}
+
+fn bytes_to_u16(buf []byte) ?u16 {
+    assert buf.len == 2
+    return buf[0] | buf[1] << 8
 }
 
 fn bytes_to_int(buf []byte) ?int {
@@ -250,6 +271,28 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
         return IpcMsg {
             msg: msg
+        }
+    }
+
+    if base.msg_type == C.IPC_POLL {
+        mut msg := IpcMsgPoll {
+            IpcMsgBase: base
+            nfds : bytes_to_u64(buf[6..14]) ?
+            timeout: bytes_to_int(buf[14..18]) ?
+            fds : []IpcMsgPollfd{}
+        }
+        for i := 0; i < msg.nfds; i += 1 {
+            offset := 18 + i*8
+            poolfd := IpcMsgPollfd {
+                fd : bytes_to_int(buf[offset..offset+4]) ?
+                events : bytes_to_u16(buf[offset+4..offset+6]) ?
+                revents : bytes_to_u16(buf[offset+6..offset+8]) ?
+            }
+            msg.fds << poolfd
+        }
+
+        return IpcMsg {
+            msg : msg
         }
     }
 
@@ -416,6 +459,33 @@ fn (im IpcMsgRecvmsg) to_bytes() ?[]byte {
     return base_bytes
 }
 
+fn (im IpcMsgPoll) to_bytes() []byte {
+    mut base_bytes := im.IpcMsgBase.to_bytes()
+    mut buf := []byte{len:12 + int(im.nfds*8)}
+
+    for i := 0; i < 8; i += 1 {
+        buf[i] = byte(im.nfds >> i*8)
+    }
+    for i := 0; i < 4; i += 1 {
+        buf[i+8] = byte(im.timeout >> i*8)
+    }
+    mut offset := 12
+    for j := 0; j < im.fds.len; j += 1 {
+        fd := im.fds[j]
+        for i := 0; i < 4; i += 1 {
+            buf[offset+i] = byte(fd.fd >> i*8)
+        }
+        buf[offset+4] = byte(fd.events)
+        buf[offset+5] = byte(fd.events >> 8)
+        buf[offset+6] = byte(fd.revents)
+        buf[offset+7] = byte(fd.revents >> 8)
+        offset += 8
+    }
+    
+    base_bytes << buf
+    return base_bytes
+}
+
 fn (im IpcMsgBase) to_string() string {
     mut s := "type:0x${im.msg_type:04X} "
     s += "pid:${im.pid}"
@@ -483,6 +553,18 @@ fn (im IpcMsgRecvmsg) to_string() string {
     return s
 }
 
+fn (im IpcMsgPoll) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "nfds:${im.nfds} "
+    s += "timeout:${im.timeout} "
+    for fd in im.fds {
+        s += "[fd:${fd.fd} "
+        s += "events:${events_to_string(fd.events)} "
+        s += "revents:${events_to_string(fd.revents)}]"
+    }
+    return s
+}
+
 fn (nd NetDevice) handle_control_usock(usock_path string) {
     mut l := unix.listen_stream(usock_path) or { panic(err) }
     for {
@@ -532,6 +614,33 @@ fn optname_to_string(opt int) string {
     return "$opt"
 }
 
+fn events_to_string(events u16) string {
+    mut s := ""
+    mut e := events
+    for {
+        old_e := e
+        if e & u16(C.POLLIN) > 0 {
+            s += "|POLLIN"
+            e &= ~u16(C.POLLIN)
+        }
+
+        if e == 0 {
+            break
+        }
+
+        if old_e == e {
+            s += " 0x${e}"
+            break
+        }
+    }
+
+    if s == "" {
+        return ""
+    } else {
+        return s[1..]
+    }
+}
+
 fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared sock_shared SocketShared) {
     mut conn := ipc_sock.stream
     for {
@@ -574,6 +683,9 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             }
             IpcMsgRecvmsg {
                 sock.handle_recvmsg(&msg, mut conn, nd, shared sock_shared) or { continue }
+            }
+            IpcMsgPoll {
+                sock.handle_poll(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
         }
     }
@@ -774,38 +886,65 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
         nd.send_ipv4(mut pkt, dest_addr) or { success = false }
 
         mut res_msg := IpcMsgError {
-            IpcMsgBase : msg.IpcMsgBase
+            IpcMsgBase : IpcMsgBase {
+                msg_type: msg.IpcMsgBase.msg_type
+                pid: msg.IpcMsgBase.pid
+            }
             rc : 0
             err : 0
         }
+        println("[IPC Sendto] ${res_msg.to_string()}")
         if !success {
             res_msg.rc = -1
             // is this ok ?
             res_msg.err = C.EBADF
             println("[IPC Sendto] sendto failed")
-            ipc_sock.write(res_msg.to_bytes()) ?
         } else {
-            res_msg.rc = int(msg.len)
+            res_msg.rc = int(msg.buf.len)
             println("[IPC Sendto] sendto success")
-            ipc_sock.write(res_msg.to_bytes()) ?
         }
+        res_msg_bytes := res_msg.to_bytes()
+        ipc_sock.write(res_msg_bytes) ?
+        mut s := ""
+        for i := 0; i < 6; i += 1 {
+            s += "0x${res_msg_bytes[i]:02X} "
+        }
+        println(s)
     }
 }
 
 fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
     println("[IPC Recvmsg] ${msg.to_string()}")
 
-    mut pkt := Packet{}
+    println("[IPC Recvmsg] try to get packet")
+    mut sock_chans := SocketChans{}
     lock sock {
-        pkt = <- sock.sock_chans.read_chan
+        sock_chans = sock.sock_chans
     }
-    buf := pkt.payload
+    mut pkt := Packet{}
+    println("[IPC Recvmsg] read_chan.len:${sock_chans.read_chan.len}")
+    select {
+        pkt = <- sock_chans.read_chan {
+        }
+        2 * time.millisecond {
+            println("[IPC Recvmsg] timeout")
+            res_msg := IpcMsgError {
+                IpcMsgBase : msg.IpcMsgBase
+                rc : -1
+                err : C.EAGAIN
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+        }
+    }
+    println("[IPC Recvmsg] get packet")
 
+    buf := pkt.payload
     mut res := *msg
     res.iov_data << buf
     l3_hdr := pkt.l3_hdr
     match l3_hdr {
         IPv4Hdr {
+            res.msg_namelen = 16
             res.addr = SockAddr {
                 addr : SockAddrIn {
                     sin_addr : l3_hdr.src_addr
@@ -825,4 +964,34 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
     res_msg_bytes := res_msg.to_bytes()
     println("[IPC Recvmsg] recvmsg success(size:${res_msg_bytes.len})")
     ipc_sock.write(res_msg_bytes) ?
+}
+
+
+fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Poll] ${msg.to_string()}")
+
+    mut res := *msg
+    for mut fd in res.fds {
+        fd.revents = 0
+        if fd.events & u16(C.POLLIN) > 0 {
+            mut pkt := Packet{}
+            select {
+                pkt = <- sock.sock_chans.read_chan {
+                    sock.sock_chans.read_chan <- pkt
+                    fd.revents |= u16(C.POLLIN)
+                }
+                msg.timeout * time.millisecond {
+                }
+            }
+        }
+    }
+
+    res_msg := IpcMsgError {
+        IpcMsgBase : msg.IpcMsgBase
+        rc : 0
+        err : 0
+        data : res.to_bytes()[msg.IpcMsgBase.len+12..]
+    }
+    println("[IPC Poll] poll success")
+    ipc_sock.write(res_msg.to_bytes()) ?
 }
