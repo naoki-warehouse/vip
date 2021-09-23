@@ -160,7 +160,7 @@ fn (nd NetDevice) handle_ipv4(ipv4_hdr &IPv4Hdr, payload []byte, mut addr_info &
                        println("[IPv4] handling sock(fd:${sock.fd}")
                        res := sock.sock_chans.read_chan.try_push(pkt)
                        println("[IPv4] handle sock(payload_len:${payload.len})")
-                       println("[IPv4] sock_chans.read_chan.len${sock.sock_chans.read_chan.len}")
+                       println("[IPv4] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
                        if res != .success {
                            println("[IPv4] failed to push read_chan(fd:${sock.fd})")
                        }

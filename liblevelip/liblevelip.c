@@ -59,7 +59,7 @@ static inline struct lvlip_sock *lvlip_get_sock(int fd) {
 
 static int is_socket_supported(int domain, int type, int protocol)
 {
-    print_err("domain:%d type:%d protocol:%d\n", domain, type, protocol);
+    lvl_dbg("domain:%d type:%d protocol:%d\n", domain, type, protocol);
     if (domain != AF_INET) return 0;
 
     if (type != SOCK_DGRAM) return 0;
@@ -434,7 +434,6 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
     if (_write(sock->lvlfd, (char *)ipc_msg, msglen) == -1) {
         perror("Error on writing IPC read");
     }
-    print_err("write")
 
     int rlen = sizeof(struct ipc_msg) + sizeof(struct ipc_err) + sizeof(struct ipc_recvmsg);
     rlen += msg->msg_iovlen*sizeof(uint64_t) + msg->msg_namelen + msg->msg_controllen;

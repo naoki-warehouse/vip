@@ -934,6 +934,7 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
                 err : C.EAGAIN
             }
             ipc_sock.write(res_msg.to_bytes()) ?
+            return
         }
     }
     println("[IPC Recvmsg] get packet")
