@@ -5,7 +5,7 @@
 #include "list.h"
 #include "utils.h"
 
-#define RCBUF_LEN 512
+#define RCBUF_LEN 16384
 
 static int (*__start_main)(int (*main) (int, char * *, char * *), int argc, \
                            char * * ubp_av, void (*init) (void), void (*fini) (void), \
@@ -113,7 +113,7 @@ static int free_socket(int lvlfd)
 
 static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
 {
-    char *buf[RCBUF_LEN];
+    static char buf[RCBUF_LEN];
 
     // Send mocked syscall to lvl-ip
     if (_write(lvlfd, (char *)msg, msglen) == -1) {
@@ -121,12 +121,15 @@ static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
     }
 
     // Read return value from lvl-ip
-    if (_read(lvlfd, buf, RCBUF_LEN) == -1) {
+    int recv_len = _read(lvlfd, buf, RCBUF_LEN);
+    if (recv_len == -1) {
         perror("Could not read IPC response");
     }
     
-    struct ipc_msg *response = (struct ipc_msg *) buf;
 
+    struct ipc_msg *response = (struct ipc_msg *) buf;
+    lvl_dbg("IPC read result: %d", recv_len);
+    lvl_dbg("0x%02X 0x%02X", buf[0], buf[1]);
     if (response->type != msg->type || response->pid != msg->pid) {
         print_err("ERR: IPC msg response expected type %d, pid %d\n"
                   "                      actual type %d, pid %d\n",
@@ -471,6 +474,7 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
 
     // uint8_t msg_name
     offset += sizeof(uint64_t) * data->msg_iovlen;
+    msg->msg_namelen = data->msg_namelen;
     memcpy(msg->msg_name, offset, msg->msg_namelen);
 
     // struct recvmsg_cmsghdr
