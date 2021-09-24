@@ -19,6 +19,7 @@ mut:
     threads []thread = []thread{}
     socks []shared Socket= []shared Socket{}
     ipc_sock_chan chan IpcSocket
+    lo_chan chan Packet
 }
 
 struct SocketShared {
@@ -62,6 +63,7 @@ fn init_netdevice() ?NetDevice {
     f := tap_alloc(netdev.tap_name) ?
     netdev.tap_fd = f.fd
     netdev.arp_table_chans = new_arp_table_chans()
+    netdev.lo_chan = chan Packet{cap: 10}
     return netdev
 }
 
@@ -73,44 +75,66 @@ fn (nd NetDevice) print() {
 }
 
 
-fn (mut nd NetDevice) handle_frame(buf []byte) ? {
-    println("recv $buf.len")
-    eth_hdr := parse_eth_hdr(buf) ?
-    println("[ETH] $eth_hdr.to_string()")
-    mut addr_info := AddrInfo {
-        mac: eth_hdr.smac
+fn (mut nd NetDevice) handle_frame(pkt &Packet) ? {
+    println("[ETH] $pkt.l2_hdr.to_string()")
+    if pkt.sockfd != 1 {
+        l3_hdr := pkt.l3_hdr
+        match l3_hdr {
+            ArpHdr {
+                nd.handle_arp(pkt, &l3_hdr)
+            }
+            IPv4Hdr {
+                nd.handle_ipv4(pkt, &l3_hdr) ?
+            }
+            HdrNone {}
+        }
     }
-    if eth_hdr.ether_type == u16(EtherType.arp) {
-        arp_hdr := parse_arp_hdr(buf[14..]) ?
-        nd.handle_arp(&arp_hdr)
-    } else if eth_hdr.ether_type == u16(EtherType.ipv4) {
-        ipv4_hdr := parse_ipv4_hdr(buf[14..]) ?
-        offset := ipv4_hdr.header_length + 14
-        nd.handle_ipv4(&ipv4_hdr, buf[offset..], mut &addr_info) ?
+    for i := 0; i < nd.socks.len; i += 1 {
+       shared sock := nd.socks[i]
+       lock sock {
+           if !(sock.domain == C.AF_INET &&
+              sock.sock_type == C.SOCK_DGRAM &&
+              sock.protocol == C.IPPROTO_ICMP) {
+               continue
+           }
+
+           if pkt.sockfd == sock.fd {
+               continue
+           }
+
+           if !pkt.is_icmp_packet() {
+               continue
+           }
+
+           println("[ICMP] handling sock(fd:${sock.fd}")
+           res := sock.sock_chans.read_chan.try_push(pkt)
+           println("[ICMP] handle sock(fd:${sock.fd})")
+           println("[ICMP] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
+           if res != .success {
+               println("[ICMP] failed to push read_chan(fd:${sock.fd})")
+           }
+       }
     }
 }
 
-fn (mut nd NetDevice) handle_arp(arp_hdr &ArpHdr) {
+fn (mut nd NetDevice) handle_arp(pkt &Packet, arp_hdr &ArpHdr) {
     println("[ARP] $arp_hdr.to_string()")
-
     arp_col := ArpTableCol{
         mac: arp_hdr.sha
         ip: arp_hdr.spa
     }
     nd.arp_table_chans.insert_chan <- arp_col
 
-    res := nd.get_arp_col(arp_hdr.spa)
-    assert arp_col.ip.to_string() == res.ip.to_string()
-    assert arp_col.mac.to_string() == res.mac.to_string()
-
-    //println("RESPONSE ${res.to_string()}")
-
     if arp_hdr.tpa.to_string() != nd.my_ip.to_string() {
         return
     }
 
+    res := nd.get_arp_col(arp_hdr.spa)
+    assert arp_col.ip.to_string() == res.ip.to_string()
+    assert arp_col.mac.to_string() == res.mac.to_string()
+
     if arp_hdr.op == u16(ArpOpcode.request) {
-        mut pkt := Packet {
+        mut send_pkt := Packet {
             l4_hdr : HdrNone{}
             payload: []byte{}
         }
@@ -119,7 +143,7 @@ fn (mut nd NetDevice) handle_arp(arp_hdr &ArpHdr) {
             mac: arp_hdr.sha
             ipv4: arp_hdr.spa
         }
-        nd.send_arp(mut pkt, &dst_addr, u16(ArpOpcode.reply)) or { println(("failed to send arp reply"))}
+        nd.send_arp(mut send_pkt, &dst_addr, u16(ArpOpcode.reply)) or { println(("failed to send arp reply"))}
     } else if arp_hdr.op == u16(ArpOpcode.reply) {
 
     } else {
@@ -137,74 +161,60 @@ fn (nd NetDevice) get_arp_col(ip IPv4Address) ArpTableCol {
     return res
 }
 
-fn (nd NetDevice) handle_ipv4(ipv4_hdr &IPv4Hdr, payload []byte, mut addr_info &AddrInfo) ? {
+fn (nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
     println("[IPv4] ${ipv4_hdr.to_string()}")
-    addr_info.ipv4 = ipv4_hdr.src_addr
 
     if ipv4_hdr.dst_addr.to_string() != nd.my_ip.to_string() {
         return
     }
 
-    if ipv4_hdr.protocol == byte(IPv4Protocol.icmp) {
-        for i := 0; i < nd.socks.len; i += 1 {
-            shared sock := nd.socks[i]
-            println("[IPv4] handling ICMP")
-            lock sock {
-                if sock.domain == C.AF_INET && 
-                   sock.sock_type == C.SOCK_DGRAM &&
-                   sock.protocol == C.IPPROTO_ICMP {
-                       pkt := Packet {
-                           l3_hdr : ipv4_hdr
-                           payload: payload
-                       }
-                       println("[IPv4] handling sock(fd:${sock.fd}")
-                       res := sock.sock_chans.read_chan.try_push(pkt)
-                       println("[IPv4] handle sock(payload_len:${payload.len})")
-                       println("[IPv4] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
-                       if res != .success {
-                           println("[IPv4] failed to push read_chan(fd:${sock.fd})")
-                       }
-                   }
-            }
-            println("[IPv4] handled ICMP done")
+    l4_hdr := pkt.l4_hdr
+    match l4_hdr {
+        IcmpHdr {
+            nd.handle_icmp(pkt, &l4_hdr)
         }
-        icmp_hdr := parse_icmp_hdr(payload) ?
-        nd.handle_icmp(&icmp_hdr, payload[4..], mut addr_info)
+        UdpHdr {
+        }
+        HdrNone {
+        }
     }
 }
 
-fn (nd NetDevice) handle_icmp(icmp_hdr &IcmpHdr, payload []byte, mut addr_info &AddrInfo) {
+fn (nd NetDevice) handle_icmp(pkt &Packet, icmp_hdr &IcmpHdr) {
     println("[ICMP] ${icmp_hdr.to_string()}")
     match icmp_hdr.hdr {
         IcmpHdrBase {
         }
         IcmpHdrEcho {
-            nd.handle_icmp_echo(&icmp_hdr.hdr, payload[4..], mut addr_info)
+            nd.handle_icmp_echo(pkt, &icmp_hdr.hdr)
         }
     }
 }
 
-fn (nd NetDevice) handle_icmp_echo(icmp_hdr_echo &IcmpHdrEcho, payload []byte, mut addr_info &AddrInfo) {
+fn (nd NetDevice) handle_icmp_echo(pkt &Packet, icmp_hdr_echo &IcmpHdrEcho) {
+    addr_info := AddrInfo {
+        ipv4 : pkt.l3_hdr.get_ipv4_hdr() or {return}.src_addr
+    }
     if icmp_hdr_echo.icmp_type == byte(IcmpType.echo_request) {
         mut icmp_reply := *icmp_hdr_echo
         icmp_reply.chksum = 0
         icmp_reply.icmp_type = byte(IcmpType.echo_reply)
 
         mut reply_bytes := icmp_reply.to_bytes()
-        reply_bytes << payload
+        reply_bytes << pkt.payload
         icmp_reply.chksum = calc_chksum(reply_bytes)
 
-        mut pkt := Packet {
+        mut send_pkt := Packet {
             l4_hdr : IcmpHdr {
                 hdr: icmp_reply
             }
-            payload : payload
+            payload : pkt.payload
         }
-        nd.send_ipv4(mut &pkt, addr_info) or { println("failed to send icmp reply")}
+        nd.send_ipv4(mut send_pkt, addr_info) or { println("failed to send icmp reply")}
     }
 }
 
-fn (nd NetDevice) send_arp(mut pkt &Packet, dst_addr &AddrInfo, op u16) ? {
+fn (nd NetDevice) send_arp(mut pkt Packet, dst_addr &AddrInfo, op u16) ? {
     mut arp_req := ArpHdr {
         hw_type : u16(ArpHWType.ethernet)
         hw_size: 6
@@ -295,30 +305,26 @@ fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
             eth_hdr.ether_type = u16(EtherType.arp)
         }
         IPv4Hdr {
-            if dst_addr.mac.to_string() != nd.my_mac.to_string() {
-                mut dmac_rev := nd.get_arp_col(l3_hdr.dst_addr)
-                mut arp_try_num := 0
-                for dmac_rev.ip.to_string() != l3_hdr.dst_addr.to_string()  && arp_try_num < 10 {
-                    println("Resolving ARP...")
-                    mut arp_pkt := Packet {
-                        l4_hdr : HdrNone{}
-                        payload: []byte{}
-                    }
-                    arp_req_addr := AddrInfo {
-                        ipv4: l3_hdr.dst_addr
-                    }
-                    nd.send_arp(mut arp_pkt, &arp_req_addr, u16(ArpOpcode.request)) ?
-                    time.sleep(100 * time.millisecond)
-                    dmac_rev = nd.get_arp_col(l3_hdr.dst_addr)
-                    arp_try_num += 1
+            mut dmac_rev := nd.get_arp_col(l3_hdr.dst_addr)
+            mut arp_try_num := 0
+            for dmac_rev.ip.to_string() != l3_hdr.dst_addr.to_string()  && arp_try_num < 10 {
+                println("Resolving ARP...")
+                mut arp_pkt := Packet {
+                    l4_hdr : HdrNone{}
+                    payload: []byte{}
                 }
-                if arp_try_num == 10 {
-                    return error("failed to resolve ${l3_hdr.dst_addr.to_string()}")
+                arp_req_addr := AddrInfo {
+                    ipv4: l3_hdr.dst_addr
                 }
-                eth_hdr.dmac = dmac_rev.mac
-            } else {
-                eth_hdr.dmac = nd.my_mac
+                nd.send_arp(mut arp_pkt, &arp_req_addr, u16(ArpOpcode.request)) ?
+                time.sleep(100 * time.millisecond)
+                dmac_rev = nd.get_arp_col(l3_hdr.dst_addr)
+                arp_try_num += 1
             }
+            if arp_try_num == 10 {
+                return error("failed to resolve ${l3_hdr.dst_addr.to_string()}")
+            }
+            eth_hdr.dmac = dmac_rev.mac
             eth_hdr.ether_type = u16(EtherType.ipv4)
         }
         HdrNone {
@@ -326,10 +332,22 @@ fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
     }
     pkt.l2_hdr = eth_hdr
 
-    nd.send_frame(pkt)
+    nd.send_frame(mut pkt)
 }
 
-fn (nd NetDevice) send_frame(pkt &Packet) {
+fn (nd NetDevice) send_frame(mut pkt Packet) {
+    if pkt.l2_hdr.dmac.to_string() == nd.my_mac.to_string() {
+        if pkt.sockfd == 0 {
+            pkt.sockfd = 1
+        }
+        res := nd.lo_chan.try_push(pkt)
+        println("[ETH] sockfd:${pkt.sockfd} lo_chan.len:${nd.lo_chan.len}")
+        if res != .success {
+            println("[ETH] failed to push lo_chan")
+        }
+        return
+    }
+
     mut buf := [9000]byte{}
     mut size := 0
 
@@ -341,12 +359,13 @@ fn (nd NetDevice) send_frame(pkt &Packet) {
     size = l3_offset
 
     mut l3_bytes := []byte{}
-    match pkt.l3_hdr {
+    l3_hdr := pkt.l3_hdr
+    match l3_hdr {
         ArpHdr {
-            l3_bytes = pkt.l3_hdr.to_bytes()
+            l3_bytes = l3_hdr.to_bytes()
         }
         IPv4Hdr {
-            l3_bytes = pkt.l3_hdr.to_bytes()
+            l3_bytes = l3_hdr.to_bytes()
         }
         HdrNone {
 
@@ -360,12 +379,13 @@ fn (nd NetDevice) send_frame(pkt &Packet) {
 
     l4_offset := size
     mut l4_bytes := []byte{}
-    match pkt.l4_hdr {
+    l4_hdr := pkt.l4_hdr
+    match l4_hdr {
         IcmpHdr {
-            l4_bytes = pkt.l4_hdr.to_bytes()
+            l4_bytes = l4_hdr.to_bytes()
         }
         UdpHdr {
-            l4_bytes = pkt.l4_hdr.to_bytes()
+            l4_bytes = l4_hdr.to_bytes()
         }
         HdrNone {
 
@@ -382,8 +402,8 @@ fn (nd NetDevice) send_frame(pkt &Packet) {
         buf[payload_offset + i] = pkt.payload[i]
     }
     size += pkt.payload.len
-    println("SEND FRAME")
     C.write(nd.tap_fd, &buf, size)
+    println("SEND FRAME")
 }
 
 fn (nd NetDevice) timer() {
@@ -398,7 +418,7 @@ fn main() {
 
     shared sock_shared := SocketShared {}
 
-    netdev.threads << go netdev.arp_table_chans.arp_table_thread()
+    netdev.threads << go netdev.arp_table_chans.arp_table_thread(&netdev.my_mac, &netdev.my_ip)
     netdev.threads << go netdev.handle_control_usock("/tmp/vip.sock")
 
     for true {
@@ -409,6 +429,9 @@ fn main() {
                 }
                 netdev.socks << sock
                 netdev.threads << go sock.handle_data(ipc_sock, &netdev, shared sock_shared)
+            }
+            pkt := <- netdev.lo_chan {
+                netdev.handle_frame(&pkt) ?
             }
             0 * time.millisecond {
                 // select is not graceful for waiting timeout?
@@ -430,7 +453,10 @@ fn main() {
 
                 mut buf := [9000]byte{}
                 count := C.read(netdev.tap_fd, &buf[0], sizeof(buf))
-                netdev.handle_frame(buf[0..count]) ?
+                println("recv $count")
+                mut pkt := Packet{}
+                parse_eth_frame(mut pkt, buf[0..count]) or { continue }
+                netdev.handle_frame(&pkt) ?
             }
         }
     }

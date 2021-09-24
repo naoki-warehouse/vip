@@ -266,7 +266,9 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
     if domain == C.AF_INET &&
        sock_type == C.SOCK_DGRAM &&
        protocol == C.IPPROTO_ICMP {
-        mut pkt := Packet{}
+        mut pkt := Packet{
+            sockfd: msg.sockfd
+        }
         parse_icmp_packet(mut pkt, msg.buf) ?
         println(pkt.l4_hdr.to_string())
         println("[IPC Sendto] Send From IPv4 Layer")
@@ -340,7 +342,15 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
     }
     println("[IPC Recvmsg] get packet")
 
-    buf := pkt.payload
+    mut buf := []byte{}
+    l4_hdr := pkt.l4_hdr
+    match l4_hdr {
+        IcmpHdr {
+            buf = l4_hdr.to_bytes()
+        }
+        else {}
+    }
+    buf << pkt.payload
     mut res := *msg
     res.iov_data << buf
     l3_hdr := pkt.l3_hdr
@@ -373,6 +383,7 @@ fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamCon
     println("[IPC Poll] ${msg.to_string()}")
 
     mut res := *msg
+    mut rc := 0
     for mut fd in res.fds {
         fd.revents = 0
         if fd.events & u16(C.POLLIN) > 0 {
@@ -381,6 +392,7 @@ fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamCon
                 pkt = <- sock.sock_chans.read_chan {
                     sock.sock_chans.read_chan <- pkt
                     fd.revents |= u16(C.POLLIN)
+                    rc += 1
                 }
                 msg.timeout * time.millisecond {
                 }
@@ -390,7 +402,7 @@ fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamCon
 
     res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase
-        rc : 0
+        rc : rc
         err : 0
         data : res.to_bytes()[msg.IpcMsgBase.len+12..]
     }

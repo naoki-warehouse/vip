@@ -199,7 +199,6 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         msg_type : buf[0] | buf[1] << 8
         pid : bytes_to_int(buf[2..6]) ?
     }
-    println("PARSED msg_type:${base.msg_type:04X}")
 
     if base.msg_type == C.IPC_SOCKET {
         assert buf.len >= 18

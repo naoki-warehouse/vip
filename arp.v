@@ -120,6 +120,8 @@ fn (ac ArpTableCol) to_string() string {
 }
 
 struct ArpTable {
+    my_mac PhysicalAddress
+    my_ip IPv4Address
 mut:
     table map[string]ArpTableCol
 }
@@ -138,11 +140,20 @@ fn (mut at ArpTable) delete (col ArpTableCol) {
 }
 
 fn (mut at ArpTable) get(ip IPv4Address) ?ArpTableCol {
+    if ip.to_string() == at.my_ip.to_string(){
+        return ArpTableCol {
+            mac: at.my_mac
+            ip: at.my_ip
+        }
+    }
     return at.table[ip.to_string()]
 }
 
-fn (chans ArpTableChans) arp_table_thread() {
-    mut arp_table := ArpTable{}
+fn (chans ArpTableChans) arp_table_thread(my_mac &PhysicalAddress, my_ip &IPv4Address) {
+    mut arp_table := ArpTable{
+        my_mac: *my_mac
+        my_ip : *my_ip
+    }
     for true {
         now := time.now()
 
