@@ -68,3 +68,20 @@ fn be_u16_to_bytes(val u16) []byte {
 
     return buf
 }
+
+fn calc_chksum(buf []byte) u16 {
+    mut chksum := u32(0)
+    for i := 0; i < buf.len; i += 2 {
+        if i + 1 >= buf.len {
+            chksum += buf[i] << 8
+        } else {
+            chksum += (buf[i] << 8) | buf[i+1]
+        }
+
+        if chksum > 0xFFFF {
+            chksum = (chksum & 0xFFFF) + 1
+        }
+    }
+
+    return u16((~chksum) & 0xFFFF)
+}
