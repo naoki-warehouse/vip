@@ -13,6 +13,7 @@ struct NetDevice {
 mut:
     tap_fd int
     tap_name string
+    tap_recv_chan chan Packet
     my_mac PhysicalAddress
     my_ip IPv4Address
     arp_table_chans ArpTableChans
@@ -62,6 +63,7 @@ fn init_netdevice() ?NetDevice {
     netdev.tap_name = "test_tap"
     f := tap_alloc(netdev.tap_name) ?
     netdev.tap_fd = f.fd
+    netdev.tap_recv_chan = chan Packet{cap: 10}
     netdev.arp_table_chans = new_arp_table_chans()
     netdev.lo_chan = chan Packet{cap: 10}
     return netdev
@@ -404,6 +406,17 @@ fn (nd NetDevice) timer() {
     }
 }
 
+fn recv_tap(nd &NetDevice) {
+    for {
+        mut buf := [9000]byte{}
+        count := C.read(nd.tap_fd, &buf[0], sizeof(buf))
+        println("recv $count")
+        mut pkt := Packet{}
+        parse_eth_frame(mut pkt, buf[0..count]) or { continue }
+        nd.tap_recv_chan <- pkt
+    }
+}
+
 fn main() {
     mut netdev := init_netdevice() ?
     netdev.print()
@@ -412,6 +425,7 @@ fn main() {
 
     netdev.threads << go netdev.arp_table_chans.arp_table_thread(&netdev.my_mac, &netdev.my_ip)
     netdev.threads << go netdev.handle_control_usock("/tmp/vip.sock")
+    netdev.threads << go recv_tap(&netdev)
 
     for true {
         select {
@@ -425,29 +439,7 @@ fn main() {
             pkt := <- netdev.lo_chan {
                 netdev.handle_frame(&pkt) ?
             }
-            0 * time.millisecond {
-                // select is not graceful for waiting timeout?
-                set := C.fd_set{}
-                C.FD_ZERO(&set)
-                C.FD_SET(netdev.tap_fd, &set)
-                timeout := C.timeval {
-                    tv_sec: 0
-                    tv_usec: 50 * 1000
-                }
-                err := C.@select(netdev.tap_fd + 1, &set, C.NULL, C.NULL, &timeout)
-                if err < 0 {
-                    panic("error!")
-                }
-                ready := C.FD_ISSET(netdev.tap_fd, &set)
-                if !ready {
-                   continue 
-                }
-
-                mut buf := [9000]byte{}
-                count := C.read(netdev.tap_fd, &buf[0], sizeof(buf))
-                println("recv $count")
-                mut pkt := Packet{}
-                parse_eth_frame(mut pkt, buf[0..count]) or { continue }
+            pkt := <- netdev.tap_recv_chan {
                 netdev.handle_frame(&pkt) ?
             }
         }

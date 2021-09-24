@@ -285,10 +285,7 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
         nd.send_ipv4(mut pkt, dest_addr) or { success = false }
 
         mut res_msg := IpcMsgError {
-            IpcMsgBase : IpcMsgBase {
-                msg_type: msg.IpcMsgBase.msg_type
-                pid: msg.IpcMsgBase.pid
-            }
+            IpcMsgBase : msg.IpcMsgBase
             rc : 0
             err : 0
         }
