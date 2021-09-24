@@ -28,17 +28,11 @@ struct PseudoHdr {
 
 fn (ph PseudoHdr) to_bytes() []byte {
     mut buf := []byte{len: 12}
-
-    for i := 0; i < 4; i += 1 {
-        buf[i] = ph.src_ip.addr[i]
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[4+i] = ph.dst_ip.addr[i]
-    }
+    copy(buf[0..4], ph.src_ip.addr[0..4])
+    copy(buf[4..8], ph.dst_ip.addr[0..4])
     buf[8] = 0
     buf[9] = ph.protocol
-    buf[10] = byte(ph.udp_length >> 8)
-    buf[11] = byte(ph.udp_length)
+    copy(buf[10..12], be_u16_to_bytes(ph.udp_length))
 
     return buf
 }

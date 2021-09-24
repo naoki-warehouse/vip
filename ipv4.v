@@ -42,29 +42,21 @@ fn parse_ipv4_hdr(buf []byte) ?IPv4Hdr {
 }
 
 fn (ip IPv4Hdr) to_bytes() []byte {
-    mut buf := [20]byte{}
+    mut buf := []byte{len:20}
     buf[0] = byte((ip.version << 4) | (ip.header_length >> 2))
     buf[1] = ip.tos
-    buf[2] = byte(ip.total_len >> 8)
-    buf[3] = byte(ip.total_len)
-    buf[4] = byte(ip.id >> 8)
-    buf[5] = byte(ip.id)
+    copy(buf[2..4], be_u16_to_bytes(ip.total_len))
+    copy(buf[4..6], be_u16_to_bytes(ip.id))
     buf[6] = byte((ip.frag_flag << 5) & 0xF)
     buf[6] |= byte((ip.frag_offset >> 8)& 0b11111)
     buf[7] = byte(ip.frag_offset)
     buf[8] = ip.ttl
     buf[9] = ip.protocol
-    buf[10] = byte(ip.chksum >> 8)
-    buf[11] = byte(ip.chksum)
-    
-    for i := 0; i < 4; i += 1 {
-        buf[12+i] = ip.src_addr.addr[i]
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[16+i] = ip.dst_addr.addr[i]
-    }
+    copy(buf[10..12], be_u16_to_bytes(ip.chksum))
+    copy(buf[12..16], ip.src_addr.addr[0..4])
+    copy(buf[16..20], ip.dst_addr.addr[0..4])
 
-    return buf[0..]
+    return buf
 }
 
 fn (ip IPv4Hdr) to_string() string {

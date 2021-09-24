@@ -21,14 +21,10 @@ fn parse_udp_hdr(buf []byte) ?UdpHdr {
 
 fn (udp UdpHdr) to_bytes() []byte {
     mut buf := []byte{len: 8}
-    buf[0] = byte(udp.src_port >> 8)
-    buf[1] = byte(udp.src_port)
-    buf[2] = byte(udp.dst_port >> 8)
-    buf[3] = byte(udp.dst_port)
-    buf[4] = byte(udp.segment_length >> 8)
-    buf[5] = byte(udp.segment_length)
-    buf[6] = byte(udp.chksum >> 8)
-    buf[7] = byte(udp.chksum)
+    copy(buf[0..2], be_u16_to_bytes(udp.src_port))
+    copy(buf[2..4], be_u16_to_bytes(udp.dst_port))
+    copy(buf[4..6], be_u16_to_bytes(udp.segment_length))
+    copy(buf[6..8], be_u16_to_bytes(udp.chksum))
 
     return buf
 }

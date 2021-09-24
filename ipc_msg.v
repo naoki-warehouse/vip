@@ -105,29 +105,6 @@ mut:
     fds []IpcMsgPollfd
 }
 
-fn bytes_to_u16(buf []byte) ?u16 {
-    assert buf.len == 2
-    return buf[0] | buf[1] << 8
-}
-
-fn bytes_to_int(buf []byte) ?int {
-    assert buf.len == 4
-    return buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
-}
-
-fn bytes_to_u32(buf []byte) ?u32 {
-    assert buf.len == 4
-    return buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
-}
-
-fn bytes_to_u64(buf []byte) ?u64 {
-    assert buf.len == 8
-    mut tmp := u64(0)
-    tmp |= buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24
-    tmp |= buf[4] << 32 | buf[5] << 40 | buf[6] << 48 | buf[7] << 56
-    return tmp
-}
-
 fn domain_to_string(domain int) string {
     if domain == C.AF_INET {
         return "AF_INET"
@@ -336,27 +313,16 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
 
 fn (im IpcMsgBase) to_bytes() []byte {
     mut buf := []byte{len: 6}
-    buf[0] = byte(im.msg_type)
-    buf[1] = byte(im.msg_type >> 8)
-    buf[2] = byte(im.pid)
-    buf[3] = byte(im.pid >> 8)
-    buf[4] = byte(im.pid >> 16)
-    buf[5] = byte(im.pid >> 24)
-    
+    copy(buf[0..2], u16_to_bytes(im.msg_type))
+    copy(buf[2..6], int_to_bytes(im.pid))
     return buf
 }
 
 fn (im IpcMsgError) to_bytes() []byte {
     mut base_bytes := im.IpcMsgBase.to_bytes()
     mut buf := []byte{len: 8}
-    buf[0] = byte(im.rc)
-    buf[1] = byte(im.rc >> 8)
-    buf[2] = byte(im.rc >> 16)
-    buf[3] = byte(im.rc >> 24)
-    buf[4] = byte(im.err)
-    buf[5] = byte(im.err >> 8)
-    buf[6] = byte(im.err >> 16)
-    buf[7] = byte(im.err >> 24)
+    copy(buf[0..4], int_to_bytes(im.rc))
+    copy(buf[4..8], int_to_bytes(im.err))
 
     base_bytes << buf
     base_bytes << im.data
@@ -367,22 +333,9 @@ fn (im IpcMsgError) to_bytes() []byte {
 fn (im IpcMsgSockname) to_bytes() []byte {
     mut base_bytes := im.IpcMsgBase.to_bytes()
     mut buf := []byte{len: 136}
-    buf[0] = byte(im.socket)
-    buf[1] = byte(im.socket >> 8)
-    buf[2] = byte(im.socket >> 16)
-    buf[3] = byte(im.socket >> 24)
-    buf[4] = byte(im.address_len)
-    buf[5] = byte(im.address_len >> 8)
-    buf[6] = byte(im.address_len >> 16)
-    buf[7] = byte(im.address_len >> 24)
-
-    mut data_size := im.data.len
-    if data_size >= 128 {
-        data_size = 128
-    }
-    for i := 0; i < data_size; i += 1 {
-        buf[i+8] = im.data[i]
-    }
+    copy(buf[0..4], int_to_bytes(im.socket))
+    copy(buf[4..8], u32_to_bytes(im.address_len))
+    copy(buf[8..136], im.data)
 
     base_bytes << buf
     return  base_bytes
@@ -391,30 +344,11 @@ fn (im IpcMsgSockname) to_bytes() []byte {
 fn (im IpcMsgSockopt) to_bytes() []byte {
     mut base_bytes := im.IpcMsgBase.to_bytes()
     mut buf := []byte{len:16 + int(im.optlen)}
-    buf[0] = byte(im.fd)
-    buf[1] = byte(im.fd >> 8)
-    buf[2] = byte(im.fd >> 16)
-    buf[3] = byte(im.fd >> 24)
-    buf[4] = byte(im.level)
-    buf[5] = byte(im.level >> 8)
-    buf[6] = byte(im.level >> 16)
-    buf[7] = byte(im.level >> 24)
-    buf[8] = byte(im.optname)
-    buf[9] = byte(im.optname >> 8)
-    buf[10] = byte(im.optname >> 16)
-    buf[11] = byte(im.optname >> 24)
-    buf[12] = byte(im.optlen)
-    buf[13] = byte(im.optlen >> 8)
-    buf[14] = byte(im.optlen >> 16)
-    buf[15] = byte(im.optlen >> 24)
-
-    mut data_size := im.optval.len
-    if data_size > im.optlen {
-        data_size = int(im.optlen)
-    }
-    for i := 0; i < data_size; i += 1 {
-        buf[i+16] = im.optval[i]
-    }
+    copy(buf[0..4], int_to_bytes(im.fd))
+    copy(buf[4..8], int_to_bytes(im.level))
+    copy(buf[8..12], int_to_bytes(im.optname))
+    copy(buf[12..16], u32_to_bytes(im.optlen))
+    copy(buf[16..16+im.optlen], im.optval)
 
     base_bytes << buf
     return base_bytes
@@ -428,64 +362,33 @@ fn (im IpcMsgRecvmsg) to_bytes() ?[]byte {
     }
 
     mut buf := []byte{len:32 + int(im.msg_iovs_len.len*8) + int(im.msg_namelen) + int(im.msg_controllen) + int(iov_len_sum)}
-    for i := 0; i < 4; i += 1 {
-        buf[i] = byte(im.sockfd >> i*8)
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[i+4] = byte(im.flags >> i*8)
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[i+8] = byte(im.msg_flags >> i*8)
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[i+12] = byte(im.msg_namelen >> i*8)
-    }
-    for i := 0; i < 8; i += 1 {
-        buf[i+16] = byte(im.msg_controllen >> i*8)
-    }
-    for i := 0; i < 8; i += 1 {
-        buf[i+24] = byte(im.msg_iovlen >> i*8)
-    }
-    for j := 0; j < im.msg_iovs_len.len; j += 1 {
-        for i := 0; i < 8; i += 1 {
-            buf[32+j*8+i] = byte(im.msg_iovs_len[j] >> i*8)
-        }
+    copy(buf[0..4], int_to_bytes(im.sockfd))
+    copy(buf[4..8], int_to_bytes(im.flags))
+    copy(buf[8..12], int_to_bytes(im.msg_flags))
+    copy(buf[12..16], u32_to_bytes(im.msg_namelen))
+    copy(buf[16..24], u64_to_bytes(im.msg_controllen))
+    copy(buf[24..32], u64_to_bytes(im.msg_iovlen))
+    for i := 0; i < im.msg_iovs_len.len; i += 1 {
+        copy(buf[32+i*8..40+i*8], u64_to_bytes(im.msg_iovs_len[i]))
     }
     mut offset := 32 + im.msg_iovs_len.len*8
     sockaddr := im.addr.addr
     match sockaddr {
         SockAddrIn {
-            sockaddr_bytes := sockaddr.to_bytes()
-            assert sockaddr_bytes.len == 16
-            for i := 0; i < 16; i += 1 {
-                buf[offset+i] = sockaddr_bytes[i]
-            }
+            copy(buf[offset..offset+16], sockaddr.to_bytes())
             offset += int(im.msg_namelen)
         }
         else { return error("not expected sockaddr")}
     }
-    mut cmsghdr_size := im.recvmsg_cmsghdr.len
-    if cmsghdr_size > im.msg_controllen {
-        cmsghdr_size = int(im.msg_controllen)
-    }
-    for i := 0; i < cmsghdr_size; i += 1 {
-        buf[offset+i] = im.recvmsg_cmsghdr[i]
-    }
+    copy(buf[offset..offset+int(im.msg_controllen)], im.recvmsg_cmsghdr)
     offset += int(im.msg_controllen)
     mut iov_num := im.iov_data.len
     if iov_num > im.msg_iovlen {
         iov_num = int(im.msg_iovlen)
     }
-    for j := 0; j < iov_num; j += 1 {
-        iov_buf := im.iov_data[j]
-        mut iov_buf_len := iov_buf.len
-        if iov_buf_len > im.msg_iovs_len[j] {
-            iov_buf_len = int(im.msg_iovs_len[j])
-        }
-        for i := 0; i < iov_buf_len; i += 1 {
-            buf[offset+i] = iov_buf[i]
-        }
-        offset += int(im.msg_iovs_len[j])
+    for i := 0; i < iov_num; i += 1 {
+        copy(buf[offset..offset+int(im.msg_iovs_len[i])], im.iov_data[i])
+        offset += int(im.msg_iovs_len[i])
     }
 
     base_bytes << buf
@@ -495,23 +398,14 @@ fn (im IpcMsgRecvmsg) to_bytes() ?[]byte {
 fn (im IpcMsgPoll) to_bytes() []byte {
     mut base_bytes := im.IpcMsgBase.to_bytes()
     mut buf := []byte{len:12 + int(im.nfds*8)}
-
-    for i := 0; i < 8; i += 1 {
-        buf[i] = byte(im.nfds >> i*8)
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[i+8] = byte(im.timeout >> i*8)
-    }
+    copy(buf[0..8], u64_to_bytes(im.nfds))
+    copy(buf[8..12], int_to_bytes(im.timeout))
     mut offset := 12
-    for j := 0; j < im.fds.len; j += 1 {
-        fd := im.fds[j]
-        for i := 0; i < 4; i += 1 {
-            buf[offset+i] = byte(fd.fd >> i*8)
-        }
-        buf[offset+4] = byte(fd.events)
-        buf[offset+5] = byte(fd.events >> 8)
-        buf[offset+6] = byte(fd.revents)
-        buf[offset+7] = byte(fd.revents >> 8)
+    for i := 0; i < im.fds.len; i += 1 {
+        fd := im.fds[i]
+        copy(buf[offset..offset+4], int_to_bytes(fd.fd))
+        copy(buf[offset+4..offset+6], u16_to_bytes(fd.events))
+        copy(buf[offset+6..offset+8], u16_to_bytes(fd.revents))
         offset += 8
     }
     

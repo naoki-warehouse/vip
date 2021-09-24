@@ -223,10 +223,7 @@ fn (shared sock Socket) handle_sockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Str
     if msg.optname == C.SO_RCVBUF {
         rcv_buf_size  := 128 * 1024
         mut optval := []byte{len:4}
-        optval[0] = byte(rcv_buf_size)
-        optval[1] = byte(rcv_buf_size >> 8)
-        optval[2] = byte(rcv_buf_size >> 16)
-        optval[3] = byte(rcv_buf_size >> 24)
+        copy(optval, int_to_bytes(rcv_buf_size))
         res_sockopt.optval = optval
         res_msg := IpcMsgError {
             IpcMsgBase : msg.IpcMsgBase
@@ -270,7 +267,6 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
             sockfd: msg.sockfd
         }
         parse_icmp_packet(mut pkt, msg.buf) ?
-        println(pkt.l4_hdr.to_string())
         println("[IPC Sendto] Send From IPv4 Layer")
         mut addr := SockAddrIn{}
         match msg.addr.addr {
@@ -321,7 +317,7 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
 
     println("[IPC Recvmsg] try to get packet")
     mut sock_chans := SocketChans{}
-    lock sock {
+    rlock sock {
         sock_chans = sock.sock_chans
     }
     mut pkt := Packet{}
@@ -329,7 +325,7 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
     select {
         pkt = <- sock_chans.read_chan {
         }
-        2 * time.millisecond {
+        200 * time.millisecond {
             println("[IPC Recvmsg] timeout")
             res_msg := IpcMsgError {
                 IpcMsgBase : msg.IpcMsgBase

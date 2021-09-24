@@ -91,7 +91,7 @@ fn (mut nd NetDevice) handle_frame(pkt &Packet) ? {
     }
     for i := 0; i < nd.socks.len; i += 1 {
        shared sock := nd.socks[i]
-       lock sock {
+       rlock sock {
            if !(sock.domain == C.AF_INET &&
               sock.sock_type == C.SOCK_DGRAM &&
               sock.protocol == C.IPPROTO_ICMP) {
@@ -348,13 +348,11 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
         return
     }
 
-    mut buf := [9000]byte{}
+    mut buf := []byte{len:9000}
     mut size := 0
 
     eth_bytes := pkt.l2_hdr.to_bytes()
-    for i := 0; i < eth_bytes.len; i += 1 {
-        buf[i] = eth_bytes[i]
-    }
+    copy(buf[0..], eth_bytes)
     l3_offset := eth_bytes.len
     size = l3_offset
 
@@ -372,9 +370,7 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
         }
     }
 
-    for i := 0; i < l3_bytes.len; i += 1 {
-        buf[l3_offset + i] = l3_bytes[i]
-    }
+    copy(buf[l3_offset..], l3_bytes)
     size += l3_bytes.len
 
     l4_offset := size
@@ -392,17 +388,13 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
         }
     }
 
-    for i := 0; i < l4_bytes.len; i += 1 {
-        buf[l4_offset + i] = l4_bytes[i]
-    }
+    copy(buf[l4_offset..], l4_bytes)
     size += l4_bytes.len
 
     payload_offset := size
-    for i := 0; i < pkt.payload.len; i += 1 {
-        buf[payload_offset + i] = pkt.payload[i]
-    }
+    copy(buf[payload_offset..], pkt.payload)
     size += pkt.payload.len
-    C.write(nd.tap_fd, &buf, size)
+    C.write(nd.tap_fd, buf.data, size)
     println("SEND FRAME")
 }
 
@@ -440,7 +432,7 @@ fn main() {
                 C.FD_SET(netdev.tap_fd, &set)
                 timeout := C.timeval {
                     tv_sec: 0
-                    tv_usec: 500 * 1000
+                    tv_usec: 50 * 1000
                 }
                 err := C.@select(netdev.tap_fd + 1, &set, C.NULL, C.NULL, &timeout)
                 if err < 0 {

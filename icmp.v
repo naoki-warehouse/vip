@@ -69,27 +69,22 @@ fn (ih IcmpHdrEcho) to_string() string {
 }
 
 fn (ih IcmpHdrBase) to_bytes() []byte {
-    mut buf := [4]byte{}
+    mut buf := []byte{len:4}
     buf[0] = ih.icmp_type
     buf[1] = ih.code
-    buf[2] = byte(ih.chksum >> 8)
-    buf[3] = byte(ih.chksum)
+    copy(buf[2..4], be_u16_to_bytes(ih.chksum))
 
     return buf[0..]
 }
 
 fn (ih IcmpHdrEcho) to_bytes() []byte {
-    buf_base := ih.IcmpHdrBase.to_bytes()
-    mut buf := [8]byte{}
-    for i := 0; i < 4; i += 1 {
-        buf[i] = buf_base[i]
-    }
-    buf[4] = byte(ih.id >> 8)
-    buf[5] = byte(ih.id)
-    buf[6] = byte(ih.seq_num >> 8)
-    buf[7] = byte(ih.seq_num)
+    mut buf_base := ih.IcmpHdrBase.to_bytes()
+    mut buf := []byte{len:4}
+    copy(buf[0..2], be_u16_to_bytes(ih.id))
+    copy(buf[2..4], be_u16_to_bytes(ih.seq_num))
+    buf_base << buf
 
-    return buf[0..]
+    return buf_base
 }
 
 fn (ih IcmpHdr) to_bytes() []byte {

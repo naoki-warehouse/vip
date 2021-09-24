@@ -20,17 +20,12 @@ fn (e EthHdr) to_string() string {
 }
 
 fn (e EthHdr) to_bytes() []byte {
-    mut buf := [14]byte{}
-    for i := 0; i < 6; i += 1 {
-        buf[i] = e.dmac.addr[i]
-    }
-    for i := 0; i < 6; i += 1 {
-        buf[i+6] = e.smac.addr[i]
-    }
-    buf[12] = byte(e.ether_type >> 8)
-    buf[13] = byte(e.ether_type)
+    mut buf := []byte{len: 14}
+    copy(buf[0..6], e.dmac.addr[0..6])
+    copy(buf[6..12], e.smac.addr[0..6])
+    copy(buf[12..14], be_u16_to_bytes(e.ether_type))
 
-    return buf[0..]
+    return buf
 }
 
 

@@ -47,30 +47,18 @@ fn parse_arp_hdr(buf []byte) ?ArpHdr {
 }
 
 fn (ah ArpHdr) to_bytes() []byte {
-    mut buf := [28]byte{}
-    buf[0] = byte(ah.hw_type >> 8)
-    buf[1] = byte(ah.hw_type)
-    buf[2] = byte(ah.proto_type >> 8)
-    buf[3] = byte(ah.proto_type)
+    mut buf := []byte{len:28}
+    copy(buf[0..2], be_u16_to_bytes(ah.hw_type))
+    copy(buf[2..4], be_u16_to_bytes(ah.proto_type))
     buf[4] = ah.hw_size
     buf[5] = ah.proto_size
-    buf[6] = byte(ah.op >> 8)
-    buf[7] = byte(ah.op)
+    copy(buf[6..8], be_u16_to_bytes(ah.op))
+    copy(buf[8..14], ah.sha.addr[0..6])
+    copy(buf[14..18], ah.spa.addr[0..4])
+    copy(buf[18..24], ah.tha.addr[0..6])
+    copy(buf[24..28], ah.tpa.addr[0..4])
 
-    for i := 0; i < 6; i += 1 {
-        buf[8+i] = ah.sha.addr[i]
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[14+i] = ah.spa.addr[i]
-    }
-    for i := 0; i < 6; i += 1 {
-        buf[18+i] = ah.tha.addr[i]
-    }
-    for i := 0; i < 4; i += 1 {
-        buf[24+i] = ah.tpa.addr[i]
-    }
-
-    return buf[0..]
+    return buf
 }
 
 fn (ah ArpHdr) to_string() string {
