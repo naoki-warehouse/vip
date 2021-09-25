@@ -14,6 +14,7 @@ mut:
     protocol int
     port u16
     sock_chans SocketChans
+    extended_recv_err bool
 }
 
 struct IpcSocket {
@@ -74,7 +75,11 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
                 break
             }
             IpcMsgSockopt {
-                sock.handle_sockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
+                if msg.msg_type == C.IPC_GETSOCKOPT {
+                    sock.handle_getsockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
+                } else if msg.msg_type == C.IPC_SETSOCKOPT {
+                    sock.handle_setsockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
+                }
             }
             IpcMsgWrite {
                 sock.handle_write(&msg, mut conn, nd, shared sock_shared) or { continue }
@@ -210,8 +215,8 @@ fn (shared sock Socket) handle_close(msg &IpcMsgClose, mut ipc_sock unix.StreamC
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
-fn (shared sock Socket) handle_sockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
-    println("[IPC Sockopt] ${msg.to_string()}")
+fn (shared sock Socket) handle_getsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Getsockopt] ${msg.to_string()}")
 
     mut res_sockopt := IpcMsgSockopt {
         IpcMsgBase : msg.IpcMsgBase
@@ -231,7 +236,7 @@ fn (shared sock Socket) handle_sockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Str
             err : 0
             data : res_sockopt.to_bytes()[msg.IpcMsgBase.len..]
         }
-        println("[IPC Sockopt] SO_RCVBUF: $rcv_buf_size")
+        println("[IPC Getsockopt] SO_RCVBUF: $rcv_buf_size")
         ipc_sock.write(res_msg.to_bytes()) ?
     } else {
         res_msg := IpcMsgError {
@@ -239,9 +244,39 @@ fn (shared sock Socket) handle_sockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Str
             rc : -1
             err : C.ENOPROTOOPT
         }
-        println("[IPC Sockopt] not supported option ${msg.to_string()}")
+        println("[IPC Getsockopt] not supported option ${msg.to_string()}")
         ipc_sock.write(res_msg.to_bytes()) ?
     }
+}
+
+fn (shared sock Socket) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Setsockopt] ${msg.to_string()}")
+
+    mut res_msg := IpcMsgError {
+        IpcMsgBase : msg.IpcMsgBase
+        rc : 0
+        err : 0
+    }
+    if msg.level == C.SOL_IP {
+        if msg.optname == C.IP_RECVERR {
+            assert msg.optlen == 4
+            rcv_err_enable := bytes_to_int(msg.optval[0..4]) ?
+            if rcv_err_enable != 0 {
+                println("[IPC Setsockopt] Enable extended recv error")
+                lock sock {
+                    sock.extended_recv_err = true
+                }
+            }
+
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+    }
+
+    println("[IPC Setsockopt] Unsupprted option")
+    res_msg.rc = -1
+    res_msg.err = C.ENOPROTOOPT
+    ipc_sock.write(res_msg.to_bytes()) ?
 }
 
 fn (shared sock Socket) handle_write(msg &IpcMsgWrite, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {

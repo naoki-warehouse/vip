@@ -133,12 +133,22 @@ fn level_to_string(level int) string {
     if level == C.SOL_SOCKET {
         return "SOL_SOCKET"
     }
+    if level == C.SOL_IP {
+        return "SOL_IP"
+    }
     return "$level"
 }
 
-fn optname_to_string(opt int) string {
+fn socket_optname_to_string(opt int) string {
     if opt == C.SO_RCVBUF {
         return "SO_RCVBUF"
+    }
+    return "$opt"
+}
+
+fn ip_optname_to_string(opt int) string {
+    if opt == C.IP_RECVERR {
+        return "IP_RECVERR"
     }
     return "$opt"
 }
@@ -222,7 +232,8 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
     }
 
-    if base.msg_type == C.IPC_GETSOCKOPT {
+    if base.msg_type == C.IPC_GETSOCKOPT ||
+       base.msg_type == C.IPC_SETSOCKOPT {
         assert buf.len >= 22
         return IpcMsg {
             msg: IpcMsgSockopt{
@@ -442,7 +453,11 @@ fn (im IpcMsgSockopt) to_string() string {
     mut s := im.IpcMsgBase.to_string() + " "
     s += "fd:${im.fd} "
     s += "level:${level_to_string(im.level)} "
-    s += "optname:${optname_to_string(im.optname)} "
+    if im.level == C.SOL_SOCKET {
+        s += "optname:${socket_optname_to_string(im.optname)} "
+    } else if im.level == C.SOL_IP {
+        s += "optname:${ip_optname_to_string(im.optname)} "
+    }
     s += "optlen:${im.optlen} "
 
     return s
