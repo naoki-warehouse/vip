@@ -114,7 +114,7 @@ static int free_socket(int lvlfd)
 
 static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
 {
-    static char buf[RCBUF_LEN];
+    char buf[RCBUF_LEN];
 
     // Send mocked syscall to lvl-ip
     if (_write(lvlfd, (char *)msg, msglen) == -1) {
@@ -645,11 +645,26 @@ int setsockopt(int fd, int level, int optname,
     struct lvlip_sock *sock = lvlip_get_sock(fd);
     if (sock == NULL) return _setsockopt(fd, level, optname, optval, optlen);
 
-    lvl_sock_dbg("Setsockopt called", sock);
-
-    /* WARN: Setsockopt not supported yet */
+    lvl_sock_dbg("Setsockopt called: level %d optname %d optval %d socklen %d",
+                 sock, level, optname, *(int *)optval, optlen);
     
-    return 0;
+    int pid = getpid();
+    int msglen = sizeof(struct ipc_msg) + sizeof(struct ipc_sockopt) + optlen;
+
+    struct ipc_msg *msg = alloca(msglen);
+    msg->type = IPC_SETSOCKOPT;
+    msg->pid = pid;
+
+    struct ipc_sockopt opts = {
+        .fd = fd,
+        .level = level,
+        .optname = optname,
+        .optlen = optlen,
+    };
+
+    memcpy(&opts.optval, optval, optlen);
+    memcpy(msg->data, &opts, sizeof(struct ipc_sockopt) + optlen);
+    return transmit_lvlip(sock->lvlfd, msg, msglen);
 }
 
 int getsockopt(int fd, int level, int optname,
