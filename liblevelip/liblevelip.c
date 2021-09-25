@@ -40,6 +40,7 @@ static int (*_getpeername)(int socket, struct sockaddr *restrict address,
                            socklen_t *restrict address_len) = NULL;
 static int (*_getsockname)(int socket, struct sockaddr *restrict address,
                            socklen_t *restrict address_len) = NULL;
+static int (*_ioctl)(int fd, unsigned long int request, ...) = NULL;
 
 static int lvlip_socks_count = 0;
 static LIST_HEAD(lvlip_socks);
@@ -902,6 +903,26 @@ int fcntl(int fildes, int cmd, ...)
     return rc;
 }
 
+int ioctl(int fd, unsigned long int request, ...)
+{
+    va_list ap;
+    void *arg;
+
+    struct lvlip_sock *sock = lvlip_get_sock(fd);
+
+    if (!sock) {
+        va_start(ap, request);
+        arg = va_arg(ap, void *);
+        va_end(ap);
+
+        return _fcntl(fd, request, arg);
+    }
+
+    lvl_sock_dbg("Ioctl called", sock);
+
+    return -1;
+}
+
 int __libc_start_main(int (*main) (int, char * *, char * *), int argc,
                       char * * ubp_av, void (*init) (void), void (*fini) (void),
                       void (*rtld_fini) (void), void (* stack_end))
@@ -924,6 +945,7 @@ int __libc_start_main(int (*main) (int, char * *, char * *), int argc,
     _close = dlsym(RTLD_NEXT, "close");
     _getpeername = dlsym(RTLD_NEXT, "getpeername");
     _getsockname = dlsym(RTLD_NEXT, "getsockname");
+    _ioctl = dlsym(RTLD_NEXT, "ioctl");
 
     list_init(&lvlip_socks);
 
