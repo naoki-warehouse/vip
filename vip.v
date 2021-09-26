@@ -194,8 +194,9 @@ fn (nd NetDevice) handle_icmp(pkt &Packet, icmp_hdr &IcmpHdr) {
 }
 
 fn (nd NetDevice) handle_icmp_echo(pkt &Packet, icmp_hdr_echo &IcmpHdrEcho) {
+    ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {return}
     addr_info := AddrInfo {
-        ipv4 : pkt.l3_hdr.get_ipv4_hdr() or {return}.src_addr
+        ipv4 : ipv4_hdr.src_addr
     }
     if icmp_hdr_echo.icmp_type == byte(IcmpType.echo_request) {
         mut icmp_reply := *icmp_hdr_echo
@@ -212,7 +213,7 @@ fn (nd NetDevice) handle_icmp_echo(pkt &Packet, icmp_hdr_echo &IcmpHdrEcho) {
             }
             payload : pkt.payload
         }
-        nd.send_ipv4(mut send_pkt, addr_info) or { println("failed to send icmp reply")}
+        nd.send_ipv4(mut send_pkt, addr_info, ipv4_hdr.ttl-1) or { println("failed to send icmp reply")}
     }
 }
 
@@ -233,7 +234,7 @@ fn (nd NetDevice) send_arp(mut pkt Packet, dst_addr &AddrInfo, op u16) ? {
     nd.send_eth(mut pkt, dst_addr) ?
 }
 
-fn (nd NetDevice) send_udp(mut pkt &Packet, dst_addr &AddrInfo, src_port u16) ? {
+fn (nd NetDevice) send_udp(mut pkt &Packet, dst_addr &AddrInfo, src_port u16, ttl int) ? {
     mut udp_hdr := UdpHdr {
         src_port : src_port
         dst_port : dst_addr.port
@@ -242,10 +243,10 @@ fn (nd NetDevice) send_udp(mut pkt &Packet, dst_addr &AddrInfo, src_port u16) ? 
     udp_hdr.segment_length = u16(udp_hdr.len() + pkt.payload.len)
 
     pkt.l4_hdr = udp_hdr
-    nd.send_ipv4(mut pkt, dst_addr) ?
+    nd.send_ipv4(mut pkt, dst_addr, ttl) ?
 }
 
-fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo) ? {
+fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo, ttl int) ? {
     mut ipv4_hdr := IPv4Hdr {}
     mut l4_hdr := &pkt.l4_hdr
     mut l4_size := 0
@@ -278,7 +279,8 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo) ? {
     ipv4_hdr.id = u16(rand.u32() & 0xFFFF)
     ipv4_hdr.frag_flag = 0
     ipv4_hdr.frag_offset = 0
-    ipv4_hdr.ttl = 64
+    // need to care ttl=0
+    ipv4_hdr.ttl = ttl
     ipv4_hdr.chksum = 0
     ipv4_hdr.src_addr = nd.my_ip
     ipv4_hdr.dst_addr = dst_addr.ipv4
@@ -436,10 +438,12 @@ fn main() {
                 netdev.socks << sock
                 netdev.threads << go sock.handle_data(ipc_sock, &netdev, shared sock_shared)
             }
-            pkt := <- netdev.lo_chan {
+            mut pkt := <- netdev.lo_chan {
+                pkt.timestamp = time.utc()
                 netdev.handle_frame(&pkt) ?
             }
-            pkt := <- netdev.tap_recv_chan {
+            mut pkt := <- netdev.tap_recv_chan {
+                pkt.timestamp = time.utc()
                 netdev.handle_frame(&pkt) ?
             }
         }

@@ -15,6 +15,14 @@ mut:
     port u16
     sock_chans SocketChans
     extended_recv_err bool
+    option_ip_ttl bool
+    option_ip_retopts bool
+    ttl int = 64
+    sndbuf_size int = 87380
+    snd_timeout time.Duration
+    rcvbuf_size int = 87380
+    rcv_timeout time.Duration
+    option_timestamp_old bool
 }
 
 struct IpcSocket {
@@ -146,10 +154,12 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
 
     mut success := true
     mut port := u16(0)
+    mut ttl := 0
     lock sock {
         port = sock.port
+        ttl = sock.ttl
     }
-    nd.send_udp(mut pkt, &dst_addr, port) or { success = false }
+    nd.send_udp(mut pkt, &dst_addr, port, ttl) or { success = false }
 
     if !success {
         res_msg := IpcMsgError {
@@ -225,28 +235,35 @@ fn (shared sock Socket) handle_getsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.
         optname : msg.optname
         optlen : msg.optlen
     }
-    if msg.optname == C.SO_RCVBUF {
-        rcv_buf_size  := 128 * 1024
-        mut optval := []byte{len:4}
-        copy(optval, int_to_bytes(rcv_buf_size))
-        res_sockopt.optval = optval
-        res_msg := IpcMsgError {
-            IpcMsgBase : msg.IpcMsgBase
-            rc : 0
-            err : 0
-            data : res_sockopt.to_bytes()[msg.IpcMsgBase.len..]
+    if msg.level == C.SOL_IP {
+
+    } else if msg.level == C.SOL_SOCKET {
+        if msg.optname == C.SO_RCVBUF {
+            mut bufsize := 0
+            rlock sock {
+                bufsize = sock.rcvbuf_size
+            }
+            mut optval := []byte{len:4}
+            copy(optval, int_to_bytes(bufsize))
+            res_sockopt.optval = optval
+            res_msg := IpcMsgError {
+                IpcMsgBase : msg.IpcMsgBase
+                rc : 0
+                err : 0
+                data : res_sockopt.to_bytes()[msg.IpcMsgBase.len..]
+            }
+            println("[IPC Getsockopt] Get recv buffer size ${bufsize}")
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
         }
-        println("[IPC Getsockopt] SO_RCVBUF: $rcv_buf_size")
-        ipc_sock.write(res_msg.to_bytes()) ?
-    } else {
-        res_msg := IpcMsgError {
-            IpcMsgBase : msg.IpcMsgBase
-            rc : -1
-            err : C.ENOPROTOOPT
-        }
-        println("[IPC Getsockopt] not supported option ${msg.to_string()}")
-        ipc_sock.write(res_msg.to_bytes()) ?
     }
+    res_msg := IpcMsgError {
+        IpcMsgBase : msg.IpcMsgBase
+        rc : -1
+        err : C.ENOPROTOOPT
+    }
+    println("[IPC Getsockopt] not supported option ${msg.to_string()}")
+    ipc_sock.write(res_msg.to_bytes()) ?
 }
 
 fn (shared sock Socket) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
@@ -266,8 +283,110 @@ fn (shared sock Socket) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.
                 lock sock {
                     sock.extended_recv_err = true
                 }
+            } else {
+                println("[IPC Setsockopt] Disable extended recv error")
+                lock sock {
+                    sock.extended_recv_err = false
+                }
             }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
 
+        if msg.optname == C.IP_RECVTTL {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable ip recv ttl")
+                lock sock {
+                    sock.option_ip_ttl = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable ip recv ttl")
+                lock sock {
+                    sock.option_ip_ttl = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+
+        if msg.optname == C.IP_RETOPTS {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable ip reopts")
+                lock sock {
+                    sock.option_ip_retopts = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable ip reopts")
+                lock sock {
+                    sock.option_ip_retopts = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+    } else if msg.level == C.SOL_SOCKET {
+        if msg.optname == C.SO_SNDBUF {
+            assert msg.optlen == 4
+            bufsize := bytes_to_int(msg.optval[0..4]) ?
+            println("[IPC Setsockopt] Set send buffer size ${bufsize}")
+            lock sock {
+                sock.sndbuf_size = bufsize
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.SO_RCVBUF {
+            assert msg.optlen == 4
+            bufsize := bytes_to_int(msg.optval[0..4]) ?
+            println("[IPC Setsockopt] Set recv buffer size ${bufsize}")
+            lock sock {
+                sock.rcvbuf_size = bufsize
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.SO_TIMESTAMP_OLD {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable timestamp old")
+                lock sock {
+                    sock.option_timestamp_old = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable timestamp old")
+                lock sock {
+                    sock.option_timestamp_old = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.SO_SNDTIMEO_OLD {
+            assert msg.optlen == 16
+            tv_sec := i64(bytes_to_u64(msg.optval[0..8]) ?)
+            tv_usec := i64(bytes_to_u64(msg.optval[8..16]) ?)
+            timeout := tv_sec * time.second + tv_usec * time.microsecond
+            println("[IPC Setsockopt] Set send timeout ${timeout/time.second} sec")
+            lock sock {
+                sock.snd_timeout = timeout
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.SO_RCVTIMEO_OLD {
+            assert msg.optlen == 16
+            tv_sec := i64(bytes_to_u64(msg.optval[0..8]) ?)
+            tv_usec := i64(bytes_to_u64(msg.optval[8..16]) ?)
+            timeout := tv_sec * time.second + tv_usec * time.microsecond
+            println("[IPC Setsockopt] Set recv timeout ${timeout/time.second} sec")
+            lock sock {
+                sock.rcv_timeout = timeout
+            }
             ipc_sock.write(res_msg.to_bytes()) ?
             return
         }
@@ -317,7 +436,11 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
         }
 
         mut success := true
-        nd.send_ipv4(mut pkt, dest_addr) or { success = false }
+        mut ttl := 0
+        rlock {
+            ttl = sock.ttl
+        }
+        nd.send_ipv4(mut pkt, dest_addr, ttl) or { success = false }
 
         mut res_msg := IpcMsgError {
             IpcMsgBase : msg.IpcMsgBase
@@ -349,23 +472,44 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
 
     println("[IPC Recvmsg] try to get packet")
     mut sock_chans := SocketChans{}
+    mut timeout := 10 * time.second
+    mut timeout_enable := false
+    mut ip_ttl := false
+    mut timestamp := false
     rlock sock {
         sock_chans = sock.sock_chans
+        if sock.rcv_timeout > 0 {
+            timeout = sock.rcv_timeout
+            timeout_enable = true
+        }
+        if sock.option_ip_ttl {
+            ip_ttl = true
+        }
+        if sock.option_timestamp_old {
+            timestamp = true
+        }
     }
     mut pkt := Packet{}
     println("[IPC Recvmsg] read_chan.len:${sock_chans.read_chan.len}")
-    select {
-        pkt = <- sock_chans.read_chan {
-        }
-        200 * time.millisecond {
-            println("[IPC Recvmsg] timeout")
-            res_msg := IpcMsgError {
-                IpcMsgBase : msg.IpcMsgBase
-                rc : -1
-                err : C.EAGAIN
+    for {
+        select {
+            pkt = <- sock_chans.read_chan {
+                break
             }
-            ipc_sock.write(res_msg.to_bytes()) ?
-            return
+            timeout * time.nanosecond {
+                if !timeout_enable {
+                    println("[IPC Recvmsg] timeout disabled")
+                    continue
+                }
+                println("[IPC Recvmsg] timeout")
+                res_msg := IpcMsgError {
+                    IpcMsgBase : msg.IpcMsgBase
+                    rc : -1
+                    err : C.EAGAIN
+                }
+                ipc_sock.write(res_msg.to_bytes()) ?
+                return
+            }
         }
     }
     println("[IPC Recvmsg] get packet")
@@ -393,6 +537,35 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
         }
         else {}
     }
+
+    if ip_ttl {
+        match l3_hdr {
+            IPv4Hdr {
+                cmsg_hdr := RecvmsgCmsgHdr {
+                    cmsg_len : 20
+                    cmsg_level : C.SOL_IP
+                    cmsg_type : C.IP_TTL
+                    cmsg_data : int_to_bytes(l3_hdr.ttl)
+                }
+                res.recvmsg_cmsghdr << cmsg_hdr.to_bytes()
+            } else {}
+        }
+    }
+
+    if timestamp {
+        tv_sec_bytes := i64_to_bytes(pkt.timestamp.unix)
+        tv_usec_bytes := i64_to_bytes(pkt.timestamp.microsecond)
+        mut cmsg_hdr := RecvmsgCmsgHdr {
+            cmsg_len : 32
+            cmsg_level : C.SOL_SOCKET
+            cmsg_type : C.SO_TIMESTAMP_OLD
+        }
+        cmsg_hdr.cmsg_data << tv_sec_bytes
+        cmsg_hdr.cmsg_data << tv_usec_bytes
+        res.recvmsg_cmsghdr << cmsg_hdr.to_bytes()
+    }
+
+    res.msg_controllen = u64(res.recvmsg_cmsghdr.len)
 
     mut res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase

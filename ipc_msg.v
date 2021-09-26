@@ -79,15 +79,23 @@ struct IpcMsgRecvmsg {
     IpcMsgBase
     sockfd int
     flags int
+mut:
     msg_flags int
     msg_controllen u64
     msg_iovlen u64
-mut:
     msg_namelen u32
     msg_iovs_len []u64
     addr SockAddr
     recvmsg_cmsghdr []byte
     iov_data [][]byte
+}
+
+struct RecvmsgCmsgHdr {
+    cmsg_len u64
+    cmsg_level int
+    cmsg_type int
+mut:
+    cmsg_data []byte
 }
 
 struct IpcMsgPollfd {
@@ -140,8 +148,20 @@ fn level_to_string(level int) string {
 }
 
 fn socket_optname_to_string(opt int) string {
+    if opt == C.SO_SNDBUF {
+        return "SO_SNDBUF"
+    }
     if opt == C.SO_RCVBUF {
         return "SO_RCVBUF"
+    }
+    if opt == C.SO_TIMESTAMP_OLD {
+        return "SO_TIMESTAMP_OLD"
+    }
+    if opt == C.SO_RCVTIMEO_OLD {
+        return "SO_RCVTIMEO_OLD"
+    }
+    if opt == C.SO_SNDTIMEO_OLD {
+        return "SO_SNDTIMEO_OLD"
     }
     return "$opt"
 }
@@ -149,6 +169,12 @@ fn socket_optname_to_string(opt int) string {
 fn ip_optname_to_string(opt int) string {
     if opt == C.IP_RECVERR {
         return "IP_RECVERR"
+    }
+    if opt == C.IP_RECVTTL {
+        return "IP_RECVTTL"
+    }
+    if opt == C.IP_RETOPTS {
+        return "IP_RETOPTS"
     }
     return "$opt"
 }
@@ -422,6 +448,16 @@ fn (im IpcMsgPoll) to_bytes() []byte {
     
     base_bytes << buf
     return base_bytes
+}
+
+fn (rc RecvmsgCmsgHdr) to_bytes() []byte {
+    mut buf := []byte{len: int(((rc.cmsg_len-1)/8 + 1)*8)}
+    copy(buf[0..8], u64_to_bytes(rc.cmsg_len))
+    copy(buf[8..12], int_to_bytes(rc.cmsg_level))
+    copy(buf[12..16], int_to_bytes(rc.cmsg_type))
+    copy(buf[16..rc.cmsg_len], rc.cmsg_data)
+
+    return buf
 }
 
 fn (im IpcMsgBase) to_string() string {

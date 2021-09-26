@@ -54,10 +54,23 @@ fn u64_to_bytes(val u64) []byte {
     buf[1] = byte(val >> 8)
     buf[2] = byte(val >> 16)
     buf[3] = byte(val >> 24)
-    buf[4] = byte(val >> 24)
-    buf[5] = byte(val >> 24)
-    buf[6] = byte(val >> 24)
-    buf[7] = byte(val >> 24)
+    buf[4] = byte(val >> 32)
+    buf[5] = byte(val >> 40)
+    buf[6] = byte(val >> 48)
+    buf[7] = byte(val >> 56)
+    return buf
+}
+
+fn i64_to_bytes(val i64) []byte {
+    mut buf := []byte{len:8}
+    buf[0] = byte(val)
+    buf[1] = byte(val >> 8)
+    buf[2] = byte(val >> 16)
+    buf[3] = byte(val >> 24)
+    buf[4] = byte(val >> 32)
+    buf[5] = byte(val >> 40)
+    buf[6] = byte(val >> 48)
+    buf[7] = byte(val >> 56)
     return buf
 }
 

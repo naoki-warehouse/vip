@@ -1,5 +1,7 @@
 module main
 
+import time
+
 struct HdrNone {}
 
 fn (hn HdrNone) len() int {
@@ -16,6 +18,8 @@ mut:
     l3_hdr L3Hdr
     l4_hdr L4Hdr
     payload []byte
+
+    timestamp time.Time
 }
 
 
