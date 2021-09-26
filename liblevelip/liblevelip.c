@@ -130,7 +130,6 @@ static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
 
     struct ipc_msg *response = (struct ipc_msg *) buf;
     lvl_dbg("IPC read result: %d", recv_len);
-    lvl_dbg("0x%02X 0x%02X", buf[0], buf[1]);
     if (response->type != msg->type || response->pid != msg->pid) {
         print_err("ERR: IPC msg response expected type %d, pid %d\n"
                   "                      actual type %d, pid %d\n",
@@ -479,7 +478,7 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
 
     // struct recvmsg_cmsghdr
     offset += data->msg_namelen;
-    memcpy(msg->msg_control, offset, msg->msg_controllen);
+    memcpy(msg->msg_control, offset, data->msg_controllen);
 
     // uint8_t *iov_base[]
     offset += data->msg_controllen;
@@ -662,8 +661,8 @@ int setsockopt(int fd, int level, int optname,
         .optlen = optlen,
     };
 
-    memcpy(&opts.optval, optval, optlen);
-    memcpy(msg->data, &opts, sizeof(struct ipc_sockopt) + optlen);
+    memcpy(msg->data, &opts, sizeof(struct ipc_sockopt));
+    memcpy(((struct ipc_sockopt *)msg->data)->optval, optval, optlen);
     return transmit_lvlip(sock->lvlfd, msg, msglen);
 }
 
@@ -690,8 +689,8 @@ int getsockopt(int fd, int level, int optname,
         .optlen = *optlen,
     };
 
-    memcpy(&opts.optval, optval, *optlen);
-    memcpy(msg->data, &opts, sizeof(struct ipc_sockopt) + *optlen);
+    memcpy(msg->data, &opts, sizeof(struct ipc_sockopt));
+    memcpy(((struct ipc_sockopt *)msg->data)->optval, optval, *optlen);
 
     // Send mocked syscall to lvl-ip
     if (_write(sock->lvlfd, (char *)msg, msglen) == -1) {
@@ -728,9 +727,6 @@ int getsockopt(int fd, int level, int optname,
                  sock, optres->level, optres->optname, *(int *)optres->optval, optres->optlen);
 
     int val = *(int *)optres->optval;
-
-    /* lvl-ip probably encoded the error value as negative */
-    val *= -1;
 
     *(int *)optval = val;
     *optlen = optres->optlen;
