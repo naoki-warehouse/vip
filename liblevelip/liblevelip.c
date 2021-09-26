@@ -478,6 +478,7 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
 
     // struct recvmsg_cmsghdr
     offset += data->msg_namelen;
+    msg->msg_controllen = data->msg_controllen;
     memcpy(msg->msg_control, offset, data->msg_controllen);
 
     // uint8_t *iov_base[]
