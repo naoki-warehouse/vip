@@ -61,6 +61,14 @@ fn parse_arp_packet(mut pkt Packet, buf []byte) ? {
 fn parse_ipv4_packet(mut pkt Packet, buf []byte) ? {
     ipv4_hdr := parse_ipv4_hdr(buf) ?
     pkt.l3_hdr = ipv4_hdr
+
+    // fragmented packet
+    if ipv4_hdr.frag_flag & 0b001 > 0 || ipv4_hdr.frag_offset > 0 {
+        pkt.l4_hdr = HdrNone{}
+        pkt.payload = buf[int(ipv4_hdr.header_length)..]
+        return 
+    }
+
     if ipv4_hdr.protocol == byte(IPv4Protocol.icmp) {
         return parse_icmp_packet(mut pkt, buf[int(ipv4_hdr.header_length)..])
     }

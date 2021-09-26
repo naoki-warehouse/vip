@@ -10,6 +10,7 @@ import rand
 #include <unistd.h>
 
 struct NetDevice {
+    mtu int = 1500
 mut:
     tap_fd int
     tap_name string
@@ -19,8 +20,83 @@ mut:
     arp_table_chans ArpTableChans
     threads []thread = []thread{}
     socks []shared Socket= []shared Socket{}
+    fragmented_packets IPv4FragmentPackets = IPv4FragmentPackets{}
     ipc_sock_chan chan IpcSocket
     lo_chan chan Packet
+}
+
+struct IPv4FragmentPackets {
+mut:
+    packets map[u16][]Packet = map[u16][]Packet{}
+}
+
+fn (mut fp IPv4FragmentPackets) insert(pkt &Packet, ipv4_hdr &IPv4Hdr) {
+    if !(ipv4_hdr.id in fp.packets) {
+        fp.packets[ipv4_hdr.id] = []Packet{}
+    }
+    fp.packets[ipv4_hdr.id] << *pkt
+}
+
+fn (fp IPv4FragmentPackets) is_complete(id u16) bool {
+    if !(id in fp.packets) {
+        return false
+    }
+    pkts := fp.packets[id]
+    mut frag_offset := 0
+    for {
+        mut found_pkt := false
+        for pkt in pkts {
+            ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
+            if ipv4_hdr.frag_offset == frag_offset {
+                frag_offset += ipv4_hdr.total_len - ipv4_hdr.header_length
+                if ipv4_hdr.frag_flag & 0b001 == 0 {
+                    return true
+                }
+                found_pkt = true
+            }
+        }
+        if !found_pkt {
+            return false
+        }
+    }
+
+    return false
+}
+
+fn (mut fp IPv4FragmentPackets) retrieve(id u16) ?Packet {
+    if !fp.is_complete(id) {
+        return error("not completed packet")
+    }
+    pkts := fp.packets[id]
+    fp.packets.delete(id)
+    mut frag_offset := 0
+    mut completed_pkt := Packet{}
+    for {
+        for pkt in pkts {
+            ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
+            if ipv4_hdr.frag_offset == frag_offset {
+                if frag_offset == 0 {
+                    completed_pkt = pkt
+                } else {
+                    completed_pkt.payload << pkt.payload
+                }
+                frag_offset += ipv4_hdr.total_len - ipv4_hdr.header_length
+                if ipv4_hdr.frag_flag & 0b001 == 0 {
+                    mut cp_ipv4_hdr := completed_pkt.l3_hdr.get_ipv4_hdr() or {return error("not completed packet")}
+                    cp_ipv4_hdr.total_len = u16(cp_ipv4_hdr.header_length + frag_offset)
+                    cp_ipv4_hdr.frag_flag = 0
+                    cp_ipv4_hdr.chksum = 0
+                    completed_pkt.l3_hdr = cp_ipv4_hdr
+
+                    mut buf := cp_ipv4_hdr.to_bytes()
+                    buf << completed_pkt.payload
+                    parse_ipv4_packet(mut completed_pkt, buf) ?
+                    return completed_pkt
+                }
+            }
+        }
+    }
+    return error("not completed packet")
 }
 
 struct SocketShared {
@@ -79,43 +155,15 @@ fn (nd NetDevice) print() {
 
 fn (mut nd NetDevice) handle_frame(pkt &Packet) ? {
     println("[ETH] $pkt.l2_hdr.to_string()")
-    if pkt.sockfd != 1 {
-        l3_hdr := pkt.l3_hdr
-        match l3_hdr {
-            ArpHdr {
-                nd.handle_arp(pkt, &l3_hdr)
-            }
-            IPv4Hdr {
-                nd.handle_ipv4(pkt, &l3_hdr) ?
-            }
-            HdrNone {}
+    l3_hdr := pkt.l3_hdr
+    match l3_hdr {
+        ArpHdr {
+            nd.handle_arp(pkt, &l3_hdr)
         }
-    }
-    for i := 0; i < nd.socks.len; i += 1 {
-       shared sock := nd.socks[i]
-       rlock sock {
-           if !(sock.domain == C.AF_INET &&
-              sock.sock_type == C.SOCK_DGRAM &&
-              sock.protocol == C.IPPROTO_ICMP) {
-               continue
-           }
-
-           if pkt.sockfd == sock.fd {
-               continue
-           }
-
-           if !pkt.is_icmp_packet() {
-               continue
-           }
-
-           println("[ICMP] handling sock(fd:${sock.fd}")
-           res := sock.sock_chans.read_chan.try_push(pkt)
-           println("[ICMP] handle sock(fd:${sock.fd})")
-           println("[ICMP] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
-           if res != .success {
-               println("[ICMP] failed to push read_chan(fd:${sock.fd})")
-           }
-       }
+        IPv4Hdr {
+            nd.handle_ipv4(pkt, &l3_hdr) ?
+        }
+        HdrNone {}
     }
 }
 
@@ -163,17 +211,60 @@ fn (nd NetDevice) get_arp_col(ip IPv4Address) ArpTableCol {
     return res
 }
 
-fn (nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
+fn (mut nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
     println("[IPv4] ${ipv4_hdr.to_string()}")
 
     if ipv4_hdr.dst_addr.to_string() != nd.my_ip.to_string() {
         return
     }
 
-    l4_hdr := pkt.l4_hdr
+    mut l4_pkt := *pkt
+
+    if (ipv4_hdr.frag_flag & 0b001 > 0) || (ipv4_hdr.frag_offset > 0) {
+        nd.fragmented_packets.insert(pkt, ipv4_hdr)
+        println("[IPv4] Inserted to fragmented packet buffer")
+        if !nd.fragmented_packets.is_complete(ipv4_hdr.id) {
+            return
+        }
+        l4_pkt = nd.fragmented_packets.retrieve(ipv4_hdr.id) ?
+        println("[IPv4] Completed packet ${l4_pkt.l3_hdr.get_ipv4_hdr()?.to_string()}")
+    }
+
+    l4_hdr := l4_pkt.l4_hdr
     match l4_hdr {
         IcmpHdr {
-            nd.handle_icmp(pkt, &l4_hdr)
+            for i := 0; i < nd.socks.len; i += 1 {
+                shared sock := nd.socks[i]
+                rlock sock {
+                    if !(sock.domain == C.AF_INET &&
+                       sock.sock_type == C.SOCK_DGRAM &&
+                       sock.protocol == C.IPPROTO_ICMP) {
+                        continue
+                    }
+
+                    if l4_pkt.sockfd == sock.fd {
+                        println("HOGE")
+                        continue
+                    }
+
+                    if !l4_pkt.is_icmp_packet() {
+                        println("HOGEHOGE")
+                        continue
+                    }
+
+                    println("[ICMP] handling sock(fd:${sock.fd})")
+                    res := sock.sock_chans.read_chan.try_push(l4_pkt)
+                    println("[ICMP] handle sock(fd:${sock.fd})")
+                    println("[ICMP] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
+                    if res != .success {
+                        println("[ICMP] failed to push read_chan(fd:${sock.fd})")
+                    }
+                }
+            }
+
+            if l4_pkt.sockfd != 1 {
+                nd.handle_icmp(l4_pkt, &l4_hdr)
+            }
         }
         UdpHdr {
         }
@@ -194,6 +285,7 @@ fn (nd NetDevice) handle_icmp(pkt &Packet, icmp_hdr &IcmpHdr) {
 }
 
 fn (nd NetDevice) handle_icmp_echo(pkt &Packet, icmp_hdr_echo &IcmpHdrEcho) {
+    println("[ICMP] Handle icmp echo")
     ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {return}
     addr_info := AddrInfo {
         ipv4 : ipv4_hdr.src_addr
@@ -274,23 +366,68 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo, ttl int) ? {
         }
     }
 
+
     ipv4_hdr.tos = 0
     ipv4_hdr.total_len = u16(ipv4_hdr.header_length + l4_size)
     ipv4_hdr.id = u16(rand.u32() & 0xFFFF)
-    ipv4_hdr.frag_flag = 0
-    ipv4_hdr.frag_offset = 0
-    // need to care ttl=0
     ipv4_hdr.ttl = ttl
-    ipv4_hdr.chksum = 0
     ipv4_hdr.src_addr = nd.my_ip
     ipv4_hdr.dst_addr = dst_addr.ipv4
 
-    ipv4_bytes := ipv4_hdr.to_bytes()
-    ipv4_hdr.chksum = calc_chksum(ipv4_bytes)
+    if ipv4_hdr.total_len > nd.mtu {
+        pkt.l3_hdr = ipv4_hdr
+        return nd.send_ipv4_fragmented(mut pkt, dst_addr)
+    } else {
+        ipv4_hdr.frag_flag = 0
+        ipv4_hdr.frag_offset = 0
+        // need to care ttl=0
+        ipv4_hdr.chksum = 0
 
-    pkt.l3_hdr = ipv4_hdr
+        ipv4_bytes := ipv4_hdr.to_bytes()
+        ipv4_hdr.chksum = calc_chksum(ipv4_bytes)
 
-    nd.send_eth(mut pkt, dst_addr) ?
+        pkt.l3_hdr = ipv4_hdr
+
+        nd.send_eth(mut pkt, dst_addr) ?
+    }
+}
+
+fn (nd NetDevice) send_ipv4_fragmented(mut pkt &Packet, dst_addr &AddrInfo) ? {
+    mut payload := []byte{}
+    l4_hdr := pkt.l4_hdr
+    match l4_hdr {
+        IcmpHdr {
+            payload = l4_hdr.to_bytes()
+        }
+        UdpHdr {
+            payload = l4_hdr.to_bytes()
+        }
+        HdrNone {}
+    } 
+    pkt.l4_hdr = HdrNone{}
+    payload << pkt.payload
+    mut ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr()?
+    for p_offset := 0; p_offset < payload.len; {
+        mut p_size := nd.mtu - ipv4_hdr.header_length
+        if p_size > payload[p_offset..].len {
+            p_size = payload[p_offset..].len
+        }
+        ipv4_hdr.total_len = u16(ipv4_hdr.header_length + p_size)
+        ipv4_hdr.frag_offset = u16(p_offset)
+        ipv4_hdr.frag_flag = 0b001
+        ipv4_hdr.chksum = 0
+        pkt.payload = payload[p_offset..p_offset+p_size]
+        p_offset += p_size
+        if p_offset == payload.len {
+            ipv4_hdr.frag_flag = 0
+        }
+        ipv4_bytes := ipv4_hdr.to_bytes()
+        ipv4_hdr.chksum = calc_chksum(ipv4_bytes)
+        pkt.l3_hdr = ipv4_hdr
+
+        nd.send_eth(mut pkt, dst_addr)?
+    }
+
 }
 
 fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
@@ -399,7 +536,7 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
     copy(buf[payload_offset..], pkt.payload)
     size += pkt.payload.len
     C.write(nd.tap_fd, buf.data, size)
-    println("SEND FRAME")
+    println("send ${size}")
 }
 
 fn (nd NetDevice) timer() {

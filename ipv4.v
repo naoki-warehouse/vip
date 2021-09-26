@@ -32,7 +32,7 @@ fn parse_ipv4_hdr(buf []byte) ?IPv4Hdr {
         total_len : be16(buf[2..4]) 
         id : be16(buf[4..6])
         frag_flag : (buf[6] >> 5) & 0b111
-        frag_offset : ((buf[6] & 0b11111) << 8) | buf[7]
+        frag_offset : (((buf[6] & 0b11111) << 8) | buf[7]) * 8
         ttl : buf[8]
         protocol : buf[9]
         chksum : be16(buf[10..12])
@@ -47,9 +47,9 @@ fn (ip IPv4Hdr) to_bytes() []byte {
     buf[1] = ip.tos
     copy(buf[2..4], be_u16_to_bytes(ip.total_len))
     copy(buf[4..6], be_u16_to_bytes(ip.id))
-    buf[6] = byte((ip.frag_flag << 5) & 0xF)
-    buf[6] |= byte((ip.frag_offset >> 8)& 0b11111)
-    buf[7] = byte(ip.frag_offset)
+    buf[6] = byte((ip.frag_flag << 5) & 0xFF)
+    buf[6] |= byte(((ip.frag_offset/8) >> 8)& 0b11111)
+    buf[7] = byte(ip.frag_offset/8)
     buf[8] = ip.ttl
     buf[9] = ip.protocol
     copy(buf[10..12], be_u16_to_bytes(ip.chksum))
@@ -66,7 +66,7 @@ fn (ip IPv4Hdr) to_string() string {
     s += "Total Length:$ip.total_len "
     s += "ID:0x${ip.id:04X} "
     s += "Fragment Flag:0b${ip.frag_flag:03b} "
-    s += "Fragment Offset:0x${ip.frag_offset:04X} "
+    s += "Fragment Offset:${ip.frag_offset} "
     s += "TTL:${ip.ttl} "
     s += "Protocol:${ip.protocol} "
     s += "CheckSum:0x${ip.chksum:04X} "
