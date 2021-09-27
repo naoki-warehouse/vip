@@ -27,6 +27,7 @@ mut:
     option_socket_keepalive bool
     option_tcp_keepidle int
     option_tcp_keepintvl int
+    option_fd_nonblock bool
 }
 
 struct IpcSocket {
@@ -104,6 +105,9 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
             }
             IpcMsgPoll {
                 sock.handle_poll(&msg, mut conn, nd, shared sock_shared) or { continue }
+            }
+            IpcMsgFcntl {
+                sock.handle_fcntl(&msg, mut conn, nd, shared sock_shared) or { continue }
             }
         }
     }
@@ -668,4 +672,59 @@ fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamCon
     }
     println("[IPC Poll] poll success")
     ipc_sock.write(res_msg.to_bytes()) ?
+}
+
+fn (shared sock Socket) handle_fcntl(msg &IpcMsgFcntl, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+    println("[IPC Fcntl] ${msg.to_string()}")
+
+    if msg.cmd == C.F_GETFL {
+        mut flag := C.O_RDWR
+        rlock sock {
+            if sock.option_fd_nonblock {
+                flag |= C.O_NONBLOCK
+            }
+        }
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : flag
+        }
+        println("[IPC Fcntl] F_GETFL result:0x${flag:04X}")
+        ipc_sock.write(res_msg.to_bytes()) ?
+        return
+    }
+    if msg.cmd == C.F_SETFL {
+        mut flag := bytes_to_int(msg.data[0..4]) ?
+        flag = flag & (~C.O_RDWR)
+        lock sock {
+            if sock.option_fd_nonblock && (flag & C.O_NONBLOCK == 0) {
+                println("[IPC Fcntl] F_SETFL disable nonblock")
+                sock.option_fd_nonblock = false
+            }
+        }
+        if flag & C.O_NONBLOCK > 0 {
+            println("[IPC Fcntl] F_SETFL enable nonblock")
+            lock sock {
+                sock.option_fd_nonblock = true
+            }
+            flag = flag & (~C.O_NONBLOCK)
+        }
+
+        if flag != 0 {
+            res_msg := IpcMsgError {
+                IpcMsgBase : msg.IpcMsgBase
+                rc : -1
+                err : C.EINVAL
+            }
+            println("[IPC Fcntl] F_SETFL failed to configure 0x${flag:04X}")
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+        }
+        println("[IPC Fcntl] F_SETFL success")
+        ipc_sock.write(res_msg.to_bytes())?
+        return
+    }
 }

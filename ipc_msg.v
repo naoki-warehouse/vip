@@ -1,7 +1,7 @@
 module main
 
 #include <netinet/tcp.h>
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgPoll
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgPoll | IpcMsgFcntl
 
 struct IpcMsg {
     msg IpcMsgType
@@ -112,6 +112,13 @@ struct IpcMsgPoll {
     timeout int
 mut:
     fds []IpcMsgPollfd
+}
+
+struct IpcMsgFcntl {
+    IpcMsgBase
+    sockfd int
+    cmd int
+    data []byte
 }
 
 fn domain_to_string(domain int) string {
@@ -230,6 +237,17 @@ fn events_to_string(events u16) string {
     } else {
         return s[1..]
     }
+}
+
+fn fcntl_cmd_to_string(cmd int) string {
+    if cmd == C.F_GETFL {
+        return "F_GETFL"
+    }
+    if cmd == C.F_SETFL {
+        return "F_SETFL"
+    }
+
+    return "$cmd"
 }
 
 fn parse_ipc_msg(buf []byte) ?IpcMsg {
@@ -366,6 +384,19 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
 
         return IpcMsg {
             msg : msg
+        }
+    }
+
+    if base.msg_type == C.IPC_FCNTL {
+        msg := IpcMsgFcntl {
+            IpcMsgBase: base
+            sockfd: bytes_to_int(buf[6..10]) ?
+            cmd: bytes_to_int(buf[10..14]) ?
+            data: buf[14..]
+        }
+
+        return IpcMsg {
+            msg:msg
         }
     }
 
@@ -568,5 +599,13 @@ fn (im IpcMsgPoll) to_string() string {
         s += "events:${events_to_string(fd.events)} "
         s += "revents:${events_to_string(fd.revents)}]"
     }
+    return s
+}
+
+fn (im IpcMsgFcntl) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "sockfd:${im.sockfd} "
+    s += "cmd:${fcntl_cmd_to_string(im.cmd)}"
+
     return s
 }
