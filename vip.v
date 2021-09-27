@@ -33,7 +33,18 @@ mut:
 fn (mut fp IPv4FragmentPackets) insert(pkt &Packet, ipv4_hdr &IPv4Hdr) {
     if !(ipv4_hdr.id in fp.packets) {
         fp.packets[ipv4_hdr.id] = []Packet{}
+        fp.packets[ipv4_hdr.id] << *pkt
+        return
     }
+
+    for i:=0; i < fp.packets[ipv4_hdr.id].len; i += 1 {
+        hdr := fp.packets[ipv4_hdr.id][i].l3_hdr.get_ipv4_hdr() or {continue}
+        if hdr.frag_offset > ipv4_hdr.frag_offset {
+            fp.packets[ipv4_hdr.id].insert(i, *pkt)
+            return
+        }
+    }
+
     fp.packets[ipv4_hdr.id] << *pkt
 }
 
@@ -43,20 +54,13 @@ fn (fp IPv4FragmentPackets) is_complete(id u16) bool {
     }
     pkts := fp.packets[id]
     mut frag_offset := 0
-    for {
-        mut found_pkt := false
-        for pkt in pkts {
-            ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
-            if ipv4_hdr.frag_offset == frag_offset {
-                frag_offset += ipv4_hdr.total_len - ipv4_hdr.header_length
-                if ipv4_hdr.frag_flag & 0b001 == 0 {
-                    return true
-                }
-                found_pkt = true
+    for pkt in pkts {
+        ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
+        if ipv4_hdr.frag_offset == frag_offset {
+            frag_offset += ipv4_hdr.total_len - ipv4_hdr.header_length
+            if ipv4_hdr.frag_flag & 0b001 == 0 {
+                return true
             }
-        }
-        if !found_pkt {
-            return false
         }
     }
 
@@ -71,28 +75,26 @@ fn (mut fp IPv4FragmentPackets) retrieve(id u16) ?Packet {
     fp.packets.delete(id)
     mut frag_offset := 0
     mut completed_pkt := Packet{}
-    for {
-        for pkt in pkts {
-            ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
-            if ipv4_hdr.frag_offset == frag_offset {
-                if frag_offset == 0 {
-                    completed_pkt = pkt
-                } else {
-                    completed_pkt.payload << pkt.payload
-                }
-                frag_offset += ipv4_hdr.total_len - ipv4_hdr.header_length
-                if ipv4_hdr.frag_flag & 0b001 == 0 {
-                    mut cp_ipv4_hdr := completed_pkt.l3_hdr.get_ipv4_hdr() or {return error("not completed packet")}
-                    cp_ipv4_hdr.total_len = u16(cp_ipv4_hdr.header_length + frag_offset)
-                    cp_ipv4_hdr.frag_flag = 0
-                    cp_ipv4_hdr.chksum = 0
-                    completed_pkt.l3_hdr = cp_ipv4_hdr
+    for pkt in pkts {
+        ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
+        if ipv4_hdr.frag_offset == frag_offset {
+            if frag_offset == 0 {
+                completed_pkt = pkt
+            } else {
+                completed_pkt.payload << pkt.payload
+            }
+            frag_offset += ipv4_hdr.total_len - ipv4_hdr.header_length
+            if ipv4_hdr.frag_flag & 0b001 == 0 {
+                mut cp_ipv4_hdr := completed_pkt.l3_hdr.get_ipv4_hdr() or {return error("not completed packet")}
+                cp_ipv4_hdr.total_len = u16(cp_ipv4_hdr.header_length + frag_offset)
+                cp_ipv4_hdr.frag_flag = 0
+                cp_ipv4_hdr.chksum = 0
+                completed_pkt.l3_hdr = cp_ipv4_hdr
 
-                    mut buf := cp_ipv4_hdr.to_bytes()
-                    buf << completed_pkt.payload
-                    parse_ipv4_packet(mut completed_pkt, buf) ?
-                    return completed_pkt
-                }
+                mut buf := cp_ipv4_hdr.to_bytes()
+                buf << completed_pkt.payload
+                parse_ipv4_packet(mut completed_pkt, buf) ?
+                return completed_pkt
             }
         }
     }
@@ -243,12 +245,10 @@ fn (mut nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
                     }
 
                     if l4_pkt.sockfd == sock.fd {
-                        println("HOGE")
                         continue
                     }
 
                     if !l4_pkt.is_icmp_packet() {
-                        println("HOGEHOGE")
                         continue
                     }
 
