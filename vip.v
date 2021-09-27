@@ -338,7 +338,8 @@ fn (nd NetDevice) send_udp(mut pkt &Packet, dst_addr &AddrInfo, src_port u16, tt
     nd.send_ipv4(mut pkt, dst_addr, ttl) ?
 }
 
-fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo, ttl int) ? {
+fn (nd NetDevice) send_ipv4(mut pkt &Packet, addr &AddrInfo, ttl int) ? {
+    mut dst_addr := *addr
     mut ipv4_hdr := IPv4Hdr {}
     mut l4_hdr := &pkt.l4_hdr
     mut l4_size := 0
@@ -366,6 +367,27 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo, ttl int) ? {
         }
     }
 
+    mut arp_resolve_addr := dst_addr.ipv4
+    mut dmac_rev := nd.get_arp_col(arp_resolve_addr)
+    mut arp_try_num := 0
+    for dmac_rev.ip.to_string() != arp_resolve_addr.to_string()  && arp_try_num < 10 {
+        println("Resolving ARP...")
+        mut arp_pkt := Packet {
+            l4_hdr : HdrNone{}
+            payload: []byte{}
+        }
+        arp_req_addr := AddrInfo {
+            ipv4: arp_resolve_addr
+        }
+        nd.send_arp(mut arp_pkt, &arp_req_addr, u16(ArpOpcode.request)) ?
+        time.sleep(100 * time.millisecond)
+        dmac_rev = nd.get_arp_col(arp_resolve_addr)
+        arp_try_num += 1
+    }
+    if arp_try_num == 10 {
+        return error("failed to resolve ${arp_resolve_addr.to_string()}")
+    }
+    dst_addr.mac = dmac_rev.mac
 
     ipv4_hdr.tos = 0
     ipv4_hdr.total_len = u16(ipv4_hdr.header_length + l4_size)
@@ -376,7 +398,7 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo, ttl int) ? {
 
     if ipv4_hdr.total_len > nd.mtu {
         pkt.l3_hdr = ipv4_hdr
-        return nd.send_ipv4_fragmented(mut pkt, dst_addr)
+        return nd.send_ipv4_fragmented(mut pkt, &dst_addr)
     } else {
         ipv4_hdr.frag_flag = 0
         ipv4_hdr.frag_offset = 0
@@ -388,7 +410,7 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, dst_addr &AddrInfo, ttl int) ? {
 
         pkt.l3_hdr = ipv4_hdr
 
-        nd.send_eth(mut pkt, dst_addr) ?
+        nd.send_eth(mut pkt, &dst_addr) ?
     }
 }
 
@@ -446,26 +468,7 @@ fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
             eth_hdr.ether_type = u16(EtherType.arp)
         }
         IPv4Hdr {
-            mut dmac_rev := nd.get_arp_col(l3_hdr.dst_addr)
-            mut arp_try_num := 0
-            for dmac_rev.ip.to_string() != l3_hdr.dst_addr.to_string()  && arp_try_num < 10 {
-                println("Resolving ARP...")
-                mut arp_pkt := Packet {
-                    l4_hdr : HdrNone{}
-                    payload: []byte{}
-                }
-                arp_req_addr := AddrInfo {
-                    ipv4: l3_hdr.dst_addr
-                }
-                nd.send_arp(mut arp_pkt, &arp_req_addr, u16(ArpOpcode.request)) ?
-                time.sleep(100 * time.millisecond)
-                dmac_rev = nd.get_arp_col(l3_hdr.dst_addr)
-                arp_try_num += 1
-            }
-            if arp_try_num == 10 {
-                return error("failed to resolve ${l3_hdr.dst_addr.to_string()}")
-            }
-            eth_hdr.dmac = dmac_rev.mac
+            eth_hdr.dmac = dst_addr.mac
             eth_hdr.ether_type = u16(EtherType.ipv4)
         }
         HdrNone {
