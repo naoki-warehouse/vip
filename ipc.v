@@ -149,41 +149,47 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
 
 fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
     println("[IPC Connect] ${msg.to_string()}")
-
-    mut pkt := Packet {
-        payload : []byte{len:100}
+    mut sock_type := 0
+    rlock sock {
+        sock_type = sock.sock_type
     }
 
-    dst_addr := AddrInfo {
-        mac: nd.my_mac
-        ipv4: nd.my_ip
-        port: sock.port
-    }
-
-    mut success := true
-    mut port := u16(0)
-    mut ttl := 0
-    lock sock {
-        port = sock.port
-        ttl = sock.ttl
-    }
-    nd.send_udp(mut pkt, &dst_addr, port, ttl) or { success = false }
-
-    if !success {
-        res_msg := IpcMsgError {
-            IpcMsgBase : msg.IpcMsgBase
-            rc : -1
-            err : C.ETIMEDOUT
+    if sock_type == C.SOCK_DGRAM {
+        mut pkt := Packet {
+            payload : []byte{len:100}
         }
-        println("[IPC Connect] connect failed")
-        ipc_sock.write(res_msg.to_bytes()) ?
-    } else {
-        res_msg := IpcMsgError {
-            IpcMsgBase : msg.IpcMsgBase
-            rc : 0
+
+        dst_addr := AddrInfo {
+            mac: nd.my_mac
+            ipv4: nd.my_ip
+            port: sock.port
         }
-        println("[IPC Connect] connect success")
-        ipc_sock.write(res_msg.to_bytes()) ?
+
+        mut success := true
+        mut port := u16(0)
+        mut ttl := 0
+        lock sock {
+            port = sock.port
+            ttl = sock.ttl
+        }
+        nd.send_udp(mut pkt, &dst_addr, port, ttl) or { success = false }
+
+        if !success {
+            res_msg := IpcMsgError {
+                IpcMsgBase : msg.IpcMsgBase
+                rc : -1
+                err : C.ETIMEDOUT
+            }
+            println("[IPC Connect] connect failed")
+            ipc_sock.write(res_msg.to_bytes()) ?
+        } else {
+            res_msg := IpcMsgError {
+                IpcMsgBase : msg.IpcMsgBase
+                rc : 0
+            }
+            println("[IPC Connect] connect success")
+            ipc_sock.write(res_msg.to_bytes()) ?
+        }
     }
 
 }
