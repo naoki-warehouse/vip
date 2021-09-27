@@ -1,5 +1,6 @@
 module main
 
+#include <netinet/tcp.h>
 type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgPoll
 
 struct IpcMsg {
@@ -124,6 +125,9 @@ fn type_to_string(sock_type int) string {
     if sock_type == C.SOCK_DGRAM {
         return "SOCK_DGRAM"
     }
+    if sock_type == C.SOCK_STREAM {
+        return "SOCK_STREAM"
+    }
     return "$sock_type"
 }
 
@@ -134,6 +138,9 @@ fn protocol_to_string(protocol int) string {
     if protocol == C.IPPROTO_IP {
         return "IPPROTO_IP"
     }
+    if protocol == C.IPPROTO_TCP {
+        return "IPPROTO_TCP"
+    }
     return "$protocol"
 }
 
@@ -143,6 +150,9 @@ fn level_to_string(level int) string {
     }
     if level == C.SOL_IP {
         return "SOL_IP"
+    }
+    if level == C.SOL_TCP {
+        return "SOL_TCP"
     }
     return "$level"
 }
@@ -163,6 +173,9 @@ fn socket_optname_to_string(opt int) string {
     if opt == C.SO_SNDTIMEO_OLD {
         return "SO_SNDTIMEO_OLD"
     }
+    if opt == C.SO_KEEPALIVE {
+        return "SO_KEEPALIVE"
+    }
     return "$opt"
 }
 
@@ -175,6 +188,19 @@ fn ip_optname_to_string(opt int) string {
     }
     if opt == C.IP_RETOPTS {
         return "IP_RETOPTS"
+    }
+    return "$opt"
+}
+
+fn tcp_optname_to_string(opt int) string {
+    if opt == C.TCP_NODELAY {
+        return "TCP_NODELAY"
+    }
+    if opt == C.TCP_KEEPIDLE {
+        return "TCP_KEEPIDLE"
+    }
+    if opt == C.TCP_KEEPINTVL {
+        return "TCP_KEEPINTVL"
     }
     return "$opt"
 }
@@ -493,6 +519,8 @@ fn (im IpcMsgSockopt) to_string() string {
         s += "optname:${socket_optname_to_string(im.optname)} "
     } else if im.level == C.SOL_IP {
         s += "optname:${ip_optname_to_string(im.optname)} "
+    } else if im.level == C.SOL_TCP {
+        s += "optname:${tcp_optname_to_string(im.optname)} "
     }
     s += "optlen:${im.optlen} "
 

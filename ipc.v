@@ -23,6 +23,10 @@ mut:
     rcvbuf_size int = 87380
     rcv_timeout time.Duration
     option_timestamp_old bool
+    option_tcp_nodelay bool
+    option_socket_keepalive bool
+    option_tcp_keepidle int
+    option_tcp_keepintvl int
 }
 
 struct IpcSocket {
@@ -386,6 +390,61 @@ fn (shared sock Socket) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.
             println("[IPC Setsockopt] Set recv timeout ${timeout/time.second} sec")
             lock sock {
                 sock.rcv_timeout = timeout
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.SO_KEEPALIVE {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable socket keepalive")
+                lock sock {
+                    sock.option_socket_keepalive = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable socket keepalive")
+                lock sock {
+                    sock.option_socket_keepalive = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+    } else if msg.level == C.SOL_TCP {
+        if msg.optname == C.TCP_NODELAY {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable tcp nodelay")
+                lock sock {
+                    sock.option_tcp_nodelay = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable tcp nodelay")
+                lock sock {
+                    sock.option_tcp_nodelay = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.TCP_KEEPIDLE {
+            assert msg.optlen == 4
+            opt_sec := bytes_to_int(msg.optval[0..4]) ?
+            println("[IPC Setsockopt] Set tcp keepalive idle ${opt_sec} sec")
+            lock sock {
+                sock.option_tcp_keepidle = opt_sec
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.TCP_KEEPINTVL {
+            assert msg.optlen == 4
+            opt_sec := bytes_to_int(msg.optval[0..4]) ?
+            println("[IPC Setsockopt] Set tcp keepalive interval ${opt_sec} sec")
+            lock sock {
+                sock.option_tcp_keepintvl = opt_sec
             }
             ipc_sock.write(res_msg.to_bytes()) ?
             return
