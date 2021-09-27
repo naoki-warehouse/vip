@@ -63,10 +63,11 @@ static int is_socket_supported(int domain, int type, int protocol)
     lvl_dbg("domain:%d type:%d protocol:%d\n", domain, type, protocol);
     if (domain != AF_INET) return 0;
 
-    if (type != SOCK_DGRAM) return 0;
+    if (type != SOCK_DGRAM && type != SOCK_STREAM) return 0;
 
-    if (protocol != IPPROTO_IP && protocol != IPPROTO_ICMP) return 0;
-
+    if (protocol != IPPROTO_IP && protocol != IPPROTO_ICMP && protocol != IPPROTO_TCP) return 0;
+    
+    lvl_dbg("domain:%d type:%d protocol:%d is supported\n", domain, type, protocol);
     return 1;
 }
 
@@ -147,9 +148,7 @@ static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
 int socket(int domain, int type, int protocol)
 {
     if (!is_socket_supported(domain, type, protocol)) {
-        errno = EAFNOSUPPORT;
-        return -1;
-        //return _socket(domain, type, protocol);
+        return _socket(domain, type, protocol);
     }
 
     struct lvlip_sock *sock;
@@ -355,7 +354,7 @@ ssize_t sendto(int fd, const void *buf, size_t len,
     struct lvlip_sock *sock = lvlip_get_sock(fd);
     if (sock == NULL) {
         /* No lvl-ip IPC socket associated */
-        _sendto(fd, buf, len, flags, dest_addr, dest_len);
+        return _sendto(fd, buf, len, flags, dest_addr, dest_len);
     }
 
     lvl_sock_dbg("Sendto called", sock);
@@ -927,7 +926,7 @@ int ioctl(int fd, unsigned long int request, ...)
         arg = va_arg(ap, void *);
         va_end(ap);
 
-        return _fcntl(fd, request, arg);
+        return _ioctl(fd, request, arg);
     }
 
     lvl_sock_dbg("Ioctl called", sock);
