@@ -35,6 +35,7 @@ fn physical_address_bcast() PhysicalAddress {
 }
 
 struct IPv4Address {
+    subnet_length int
 mut:
     addr [4]byte
 }
@@ -57,6 +58,19 @@ fn (ia IPv4Address) to_string() string {
     }
 
     return s[1..]
+}
+
+fn (ia &IPv4Address) contains(addr &IPv4Address) bool {
+    mut network_mask := u32(0)
+    for i := 0; i < 32; i += 1 {
+        network_mask = network_mask << 1
+        if i < ia.subnet_length {
+            network_mask |= 1
+        }
+    }
+    ip_a := be_bytes_to_u32(ia.addr[0..4]) or {return false}
+    ip_b := be_bytes_to_u32(addr.addr[0..4]) or {return false}
+    return (ip_a ^ ip_b) & network_mask == 0
 }
 
 struct AddrInfo {

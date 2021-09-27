@@ -29,7 +29,7 @@ enum ArpOpcode {
 }
 
 fn parse_arp_hdr(buf []byte) ?ArpHdr {
-    assert buf.len >= sizeof(ArpHdr)
+    assert buf.len >= 28
 
     mut arp_hdr := ArpHdr{
         hw_type : be16(buf[0..2])

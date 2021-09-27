@@ -17,6 +17,7 @@ mut:
     tap_recv_chan chan Packet
     my_mac PhysicalAddress
     my_ip IPv4Address
+    my_dgw IPv4Address
     arp_table_chans ArpTableChans
     threads []thread = []thread{}
     socks []shared Socket= []shared Socket{}
@@ -133,10 +134,19 @@ fn init_netdevice() ?NetDevice {
     netdev.my_mac.addr[3] = 0x4D
     netdev.my_mac.addr[4] = 0x3F
     netdev.my_mac.addr[5] = 0xE4
+    netdev.my_ip = IPv4Address {
+        subnet_length : 24
+    }
     netdev.my_ip.addr[0] = 192
     netdev.my_ip.addr[1] = 168
     netdev.my_ip.addr[2] = 10
     netdev.my_ip.addr[3] = 2
+    netdev.my_dgw.addr[0] = 192
+    netdev.my_dgw.addr[1] = 168
+    netdev.my_dgw.addr[2] = 10
+    netdev.my_dgw.addr[3] = 1
+
+    assert netdev.my_ip.contains(netdev.my_dgw)
 
     netdev.tap_name = "test_tap"
     f := tap_alloc(netdev.tap_name) ?
@@ -367,7 +377,13 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, addr &AddrInfo, ttl int) ? {
         }
     }
 
+    // dst addr may be out of subnet
     mut arp_resolve_addr := dst_addr.ipv4
+    if !nd.my_ip.contains(dst_addr.ipv4) {
+        arp_resolve_addr = nd.my_dgw
+    }
+    assert nd.my_ip.contains(arp_resolve_addr)
+
     mut dmac_rev := nd.get_arp_col(arp_resolve_addr)
     mut arp_try_num := 0
     for dmac_rev.ip.to_string() != arp_resolve_addr.to_string()  && arp_try_num < 10 {
