@@ -2,6 +2,7 @@ module main
 
 import time
 import net.unix
+import rand
 
 #include "@VMODROOT/liblevelip/ipc.h"
 
@@ -120,11 +121,20 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
 
     mut fd := 0
     mut port := u16(0)
-    lock sock_shared {
-        fd = sock_shared.fd_base
-        port = sock_shared.udp_port_base
-        sock_shared.fd_base += 1
-        sock_shared.udp_port_base += 1
+    if msg.sock_type == C.SOCK_DGRAM {
+        lock sock_shared {
+            fd = sock_shared.fd_base
+            port = sock_shared.udp_port_base
+            sock_shared.fd_base += 1
+            sock_shared.udp_port_base += 1
+        }
+    } else if msg.sock_type == C.SOCK_STREAM {
+        lock sock_shared {
+            fd = sock_shared.fd_base
+            port = sock_shared.tcp_port_base
+            sock_shared.fd_base += 1
+            sock_shared.tcp_port_base += 1
+        }
     }
 
     lock sock {
@@ -154,6 +164,14 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
         sock_type = sock.sock_type
     }
 
+    mut sock_chans := SocketChans{}
+    mut port := u16(0)
+    mut ttl := 0
+    rlock sock {
+        sock_chans = sock.sock_chans
+        port = sock.port
+        ttl = sock.ttl
+    }
     if sock_type == C.SOCK_DGRAM {
         mut pkt := Packet {
             payload : []byte{len:100}
@@ -166,12 +184,6 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
         }
 
         mut success := true
-        mut port := u16(0)
-        mut ttl := 0
-        lock sock {
-            port = sock.port
-            ttl = sock.ttl
-        }
         nd.send_udp(mut pkt, &dst_addr, port, ttl) or { success = false }
 
         if !success {
@@ -190,6 +202,65 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
             println("[IPC Connect] connect success")
             ipc_sock.write(res_msg.to_bytes()) ?
         }
+    } else if sock_type == C.SOCK_STREAM {
+        mut pkt := Packet {}
+        mut dst_addr := AddrInfo{}
+        addr := msg.addr.addr
+        match addr {
+            SockAddrIn {
+                dst_addr.ipv4 = addr.sin_addr
+                dst_addr.port = addr.sin_port
+            } else {}
+        }
+        mut tcp_hdr := TcpHdr {
+            src_port : port
+            dst_port : dst_addr.port
+            seq_num : u16(rand.u32())
+            ack_num : 0
+            data_offset : 20
+            control_flags : u8(tcp_syn)
+            window_size: 4000
+        }
+        pkt.l4_hdr = tcp_hdr
+        nd.send_ipv4(mut pkt, &dst_addr, ttl)?
+        select {
+            pkt = <- sock_chans.read_chan {
+            }
+            /*
+            timeout * time.nanosecond {
+                if !timeout_enable {
+                    println("[IPC Recvmsg] timeout disabled")
+                    continue
+                }
+                println("[IPC Recvmsg] timeout")
+                res_msg := IpcMsgError {
+                    IpcMsgBase : msg.IpcMsgBase
+                    rc : -1
+                    err : C.EAGAIN
+                }
+                ipc_sock.write(res_msg.to_bytes()) ?
+                return
+            }
+            */
+        }
+        expected_flags := tcp_syn|tcp_ack
+        recv_tcp_hdr := pkt.l4_hdr.get_tcp_hdr()?
+        if recv_tcp_hdr.control_flags & expected_flags != expected_flags {
+            panic("UNEXPECTED PACKET")
+        }
+        println("[TCP] SYNACK Received")
+        tcp_hdr.seq_num += 1
+        tcp_hdr.ack_num = recv_tcp_hdr.seq_num + 1
+        tcp_hdr.control_flags = u8(tcp_ack)
+        pkt.l4_hdr = tcp_hdr
+        pkt.payload = []byte{}
+        nd.send_ipv4(mut pkt, &dst_addr, ttl)?
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : 0
+        }
+        println("[IPC Connect] connect success")
+        ipc_sock.write(res_msg.to_bytes()) ?
     }
 
 }

@@ -9,7 +9,7 @@ fn (hn HdrNone) len() int {
 }
 
 type L3Hdr = HdrNone | ArpHdr | IPv4Hdr
-type L4Hdr = HdrNone | IcmpHdr | UdpHdr
+type L4Hdr = HdrNone | IcmpHdr | UdpHdr | TcpHdr
 
 struct Packet {
 mut:
@@ -73,6 +73,10 @@ fn parse_ipv4_packet(mut pkt Packet, buf []byte) ? {
         return parse_icmp_packet(mut pkt, buf[int(ipv4_hdr.header_length)..])
     }
 
+    if ipv4_hdr.protocol == byte(IPv4Protocol.tcp) {
+        return parse_tcp_packet(mut pkt, buf[int(ipv4_hdr.header_length)..])
+    }
+
     return error("unknown protocol:${ipv4_hdr.protocol}")
 }
 
@@ -80,6 +84,12 @@ fn parse_icmp_packet(mut pkt Packet, buf []byte) ? {
     icmp_hdr := parse_icmp_hdr(buf) ?
     pkt.l4_hdr = icmp_hdr
     pkt.payload = buf[icmp_hdr.len()..]
+}
+
+fn parse_tcp_packet(mut pkt Packet, buf []byte) ? {
+    tcp_hdr := parse_tcp_hdr(buf) ?
+    pkt.l4_hdr = tcp_hdr
+    pkt.payload = buf[tcp_hdr.data_offset..]
 }
 
 fn (l3_hdr &L3Hdr) to_string() string {
@@ -104,6 +114,9 @@ fn (l4_hdr &L4Hdr) to_string() string {
         UdpHdr {
             return ""
         }
+        TcpHdr {
+            return l4_hdr.to_string()
+        }
         HdrNone {
             return ""
         }
@@ -116,7 +129,7 @@ fn (l3_hdr &L3Hdr) get_ipv4_hdr() ?IPv4Hdr {
             return l3_hdr
         }
         else {
-            return error("not arp header")
+            return error("not ipv4 header")
         }
     }
 }
@@ -128,6 +141,28 @@ fn (pkt &Packet) is_icmp_packet() bool {
         }
         else {
             return false
+        }
+    }
+}
+
+fn (pkt &Packet) is_tcp_packet() bool {
+    match pkt.l4_hdr {
+        TcpHdr {
+            return true
+        }
+        else {
+            return false
+        }
+    }
+}
+
+fn (l4_hdr &L4Hdr) get_tcp_hdr() ?TcpHdr {
+    match l4_hdr {
+        TcpHdr {
+            return l4_hdr
+        }
+        else {
+            return error("not tcp header")
         }
     }
 }

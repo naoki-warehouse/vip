@@ -109,11 +109,6 @@ mut:
     tcp_port_base u16 = 49152
 }
 
-fn be16(buf []byte) u16 {
-    assert buf.len == 2
-    return buf[0] << 8 | buf[1]
-}
-
 fn C.ioctl(fd int, request u64, arg voidptr) int
 
 //const ifname_size = C.IFNAMSIZ
@@ -278,6 +273,11 @@ fn (mut nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
         }
         UdpHdr {
         }
+        TcpHdr {
+            if l4_pkt.sockfd != 1 {
+                nd.handle_tcp(l4_pkt, &l4_hdr)
+            }
+        }
         HdrNone {
         }
     }
@@ -316,6 +316,36 @@ fn (nd NetDevice) handle_icmp_echo(pkt &Packet, icmp_hdr_echo &IcmpHdrEcho) {
             payload : pkt.payload
         }
         nd.send_ipv4(mut send_pkt, addr_info, ipv4_hdr.ttl-1) or { println("failed to send icmp reply")}
+    }
+}
+
+fn (nd NetDevice) handle_tcp(pkt &Packet, tcp_hdr &TcpHdr) {
+    println("[TCP] ${tcp_hdr.to_string()}")
+    for i := 0; i < nd.socks.len; i += 1 {
+        shared sock := nd.socks[i]
+        rlock sock {
+            if !(sock.domain == C.AF_INET &&
+               sock.sock_type == C.SOCK_STREAM &&
+               sock.protocol == C.IPPROTO_IP) {
+                continue
+            }
+
+            if pkt.sockfd == sock.fd {
+                continue
+            }
+
+            if tcp_hdr.dst_port != sock.port {
+                continue
+            }
+
+            println("[TCP] handling sock(fd:${sock.fd})")
+            res := sock.sock_chans.read_chan.try_push(*pkt)
+            println("[TCP] handle sock(fd:${sock.fd})")
+            println("[TCP] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
+            if res != .success {
+                println("[TCP] failed to push read_chan(fd:${sock.fd})")
+            }
+        }
     }
 }
 
@@ -361,6 +391,20 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, addr &AddrInfo, ttl int) ? {
         UdpHdr {
             l4_size = l4_hdr.len() + pkt.payload.len
             ipv4_hdr.protocol = byte(IPv4Protocol.udp)
+            ph := PseudoHdr {
+                src_ip : nd.my_ip,
+                dst_ip : dst_addr.ipv4
+                protocol : ipv4_hdr.protocol
+                udp_length : u16(l4_size)
+            }
+            mut pseudo_bytes := ph.to_bytes()
+            pseudo_bytes << l4_hdr.to_bytes()
+            pseudo_bytes << pkt.payload
+            l4_hdr.chksum = calc_chksum(pseudo_bytes)
+        }
+        TcpHdr {
+            l4_size = l4_hdr.data_offset + pkt.payload.len
+            ipv4_hdr.protocol = byte(IPv4Protocol.tcp)
             ph := PseudoHdr {
                 src_ip : nd.my_ip,
                 dst_ip : dst_addr.ipv4
@@ -438,6 +482,9 @@ fn (nd NetDevice) send_ipv4_fragmented(mut pkt &Packet, dst_addr &AddrInfo) ? {
             payload = l4_hdr.to_bytes()
         }
         UdpHdr {
+            payload = l4_hdr.to_bytes()
+        }
+        TcpHdr {
             payload = l4_hdr.to_bytes()
         }
         HdrNone {}
@@ -541,6 +588,9 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
             l4_bytes = l4_hdr.to_bytes()
         }
         UdpHdr {
+            l4_bytes = l4_hdr.to_bytes()
+        }
+        TcpHdr {
             l4_bytes = l4_hdr.to_bytes()
         }
         HdrNone {

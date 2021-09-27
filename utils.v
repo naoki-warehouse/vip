@@ -82,6 +82,16 @@ fn be_u16_to_bytes(val u16) []byte {
     return buf
 }
 
+fn be_u32_to_bytes(val u32) []byte {
+    mut buf := []byte{len:4}
+    buf[0] = byte(val >> 24)
+    buf[1] = byte(val >> 16)
+    buf[2] = byte(val >> 8)
+    buf[3] = byte(val)
+
+    return buf
+}
+
 fn be_bytes_to_u32(buf []byte) ?u32 {
     assert buf.len == 4
     mut val := u32(0)
@@ -90,6 +100,11 @@ fn be_bytes_to_u32(buf []byte) ?u32 {
     val |= buf[2] << 8
     val |= buf[3] << 0
     return val
+}
+
+fn be16(buf []byte) u16 {
+    assert buf.len == 2
+    return buf[0] << 8 | buf[1]
 }
 
 fn calc_chksum(buf []byte) u16 {
