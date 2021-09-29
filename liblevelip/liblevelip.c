@@ -368,10 +368,12 @@ ssize_t sendto(int fd, const void *buf, size_t len,
     struct ipc_sendto payload = {
         .sockfd = fd,
         .flags = flags,
-        .addr = *dest_addr,
         .addrlen = dest_len,
         .len = len
     };
+    if (dest_addr != NULL) {
+        payload.addr = *dest_addr;
+    }
 
     memcpy(msg->data, &payload, sizeof(struct ipc_sendto));
     memcpy(((struct ipc_sendto *)msg->data)->buf, buf, len);
@@ -391,7 +393,11 @@ ssize_t recvfrom(int fd, void *restrict buf, size_t len,
     if (!lvlip_get_sock(fd)) return _recvfrom(fd, buf, len,
                                           flags, address, addrlen);
 
-    return read(fd, buf, len);
+    if (address == NULL) {
+        return read(fd, buf, len);
+    }
+
+    return -1;
 }
 
 ssize_t recvmsg(int fd, struct msghdr *msg, int flags)

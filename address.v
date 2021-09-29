@@ -81,10 +81,12 @@ mut:
 }
 
 
-type SockAddrType = SockAddrBase | SockAddrIn
+type SockAddrType = SockAddrNone | SockAddrBase | SockAddrIn
 struct SockAddr {
     addr SockAddrType
 }
+
+struct SockAddrNone {}
 
 struct SockAddrBase {
 mut:
@@ -101,10 +103,15 @@ mut:
 }
 
 fn parse_sockaddr(buf []byte) ?SockAddr {
-    assert buf.len >= 16
+    if buf.len == 0 {
+        return SockAddr {
+            addr: SockAddrNone{}
+        }
+    }
 
     family := buf[0] | buf[1] << 8
     if family == C.AF_INET {
+        assert buf.len >= 16
         return SockAddr {
             addr : SockAddrIn {
                 family : family
@@ -124,6 +131,9 @@ fn parse_sockaddr(buf []byte) ?SockAddr {
 
 fn (addr SockAddr) to_string() string {
     match addr.addr {
+        SockAddrNone {
+            return "None"
+        }
         SockAddrBase {
             return "$addr.addr"
         }

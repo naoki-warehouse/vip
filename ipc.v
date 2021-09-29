@@ -2,7 +2,6 @@ module main
 
 import time
 import net.unix
-import rand
 
 #include "@VMODROOT/liblevelip/ipc.h"
 
@@ -15,6 +14,8 @@ mut:
     protocol int
     port u16
     sock_chans SocketChans
+    tcp_thread []thread = []thread{}
+    tcp_chans TcpSocketChans
     extended_recv_err bool
     option_ip_ttl bool
     option_ip_retopts bool
@@ -40,9 +41,21 @@ struct SocketChans {
     read_chan chan Packet
 }
 
+struct TcpSocketChans {
+    SocketChans
+    control_chan chan TcpOps
+}
+
 fn new_socket_chans() SocketChans {
     return SocketChans {
         read_chan : chan Packet{cap: 10}
+    }
+}
+
+fn new_tcp_socket_chans() TcpSocketChans {
+    return TcpSocketChans {
+        SocketChans: new_socket_chans()
+        control_chan : chan TcpOps{}
     }
 }
 
@@ -57,7 +70,7 @@ fn (nd NetDevice) handle_control_usock(usock_path string) {
     }
 }
 
-fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared sock_shared SocketShared) {
+fn (nd &NetDevice) handle_data(ipc_sock IpcSocket, shared sock Socket, shared sock_shared SocketShared) {
     mut conn := ipc_sock.stream
     for {
         mut buf := []byte{len: 8192, init: 0}
@@ -76,39 +89,46 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
 
             }
             IpcMsgSocket {
-                sock.handle_socket(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_socket(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
             IpcMsgConnect {
-                sock.handle_connect(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_connect(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
             IpcMsgSockname {
-                sock.handle_sockname(&msg, mut conn, nd, shared sock_shared) or { continue }
+                if msg.msg_type == C.IPC_GETSOCKNAME {
+                    nd.handle_getsockname(&msg, mut conn, shared sock, shared sock_shared) or { continue }
+                } else if msg.msg_type == C.IPC_GETPEERNAME {
+                    nd.handle_getpeername(&msg, mut conn, shared sock, shared sock_shared) or { continue }
+                }
             }
             IpcMsgClose {
-                sock.handle_close(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_close(&msg, mut conn, shared sock, shared sock_shared) or { continue }
                 break
             }
             IpcMsgSockopt {
                 if msg.msg_type == C.IPC_GETSOCKOPT {
-                    sock.handle_getsockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
+                    nd.handle_getsockopt(&msg, mut conn, shared sock, shared sock_shared) or { continue }
                 } else if msg.msg_type == C.IPC_SETSOCKOPT {
-                    sock.handle_setsockopt(&msg, mut conn, nd, shared sock_shared) or { continue }
+                    nd.handle_setsockopt(&msg, mut conn, shared sock, shared sock_shared) or { continue }
                 }
             }
             IpcMsgWrite {
-                sock.handle_write(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_write(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
             IpcMsgSendto {
-                sock.handle_sendto(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_sendto(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
             IpcMsgRecvmsg {
-                sock.handle_recvmsg(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_recvmsg(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
             IpcMsgPoll {
-                sock.handle_poll(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_poll(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
             IpcMsgFcntl {
-                sock.handle_fcntl(&msg, mut conn, nd, shared sock_shared) or { continue }
+                nd.handle_fcntl(&msg, mut conn, shared sock, shared sock_shared) or { continue }
+            }
+            IpcMsgRead {
+                nd.handle_read(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
         }
     }
@@ -116,7 +136,7 @@ fn (shared sock Socket) handle_data(ipc_sock IpcSocket, nd &NetDevice, shared so
     println("[IPC] socket closed")
 }
 
-fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice)handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Socket] ${msg.to_string()}")
 
     mut fd := 0
@@ -146,6 +166,16 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
         sock.port = port
     }
 
+    if msg.sock_type == C.SOCK_STREAM {
+        rlock {
+            op := TcpOps {
+                msg: IpcMsg{msg: msg}
+                ipc_sock: ipc_sock
+            }
+            sock.tcp_chans.control_chan <- op
+        }
+    }
+
     res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase
         rc : fd
@@ -157,18 +187,16 @@ fn (shared sock Socket) handle_socket(msg &IpcMsgSocket, mut ipc_sock unix.Strea
     ipc_sock.write(res_msg_bytes) ?
 }
 
-fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Connect] ${msg.to_string()}")
     mut sock_type := 0
     rlock sock {
         sock_type = sock.sock_type
     }
 
-    mut sock_chans := SocketChans{}
     mut port := u16(0)
     mut ttl := 0
     rlock sock {
-        sock_chans = sock.sock_chans
         port = sock.port
         ttl = sock.ttl
     }
@@ -203,74 +231,27 @@ fn (shared sock Socket) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.Str
             ipc_sock.write(res_msg.to_bytes()) ?
         }
     } else if sock_type == C.SOCK_STREAM {
-        mut pkt := Packet {}
-        mut dst_addr := AddrInfo{}
-        addr := msg.addr.addr
-        match addr {
-            SockAddrIn {
-                dst_addr.ipv4 = addr.sin_addr
-                dst_addr.port = addr.sin_port
-            } else {}
-        }
-        mut tcp_hdr := TcpHdr {
-            src_port : port
-            dst_port : dst_addr.port
-            seq_num : u16(rand.u32())
-            ack_num : 0
-            data_offset : 20
-            control_flags : u8(tcp_syn)
-            window_size: 4000
-        }
-        pkt.l4_hdr = tcp_hdr
-        nd.send_ipv4(mut pkt, &dst_addr, ttl)?
-        select {
-            pkt = <- sock_chans.read_chan {
+        rlock sock {
+            op := TcpOps {
+                msg: IpcMsg{msg: msg}
+                ipc_sock: ipc_sock
             }
-            /*
-            timeout * time.nanosecond {
-                if !timeout_enable {
-                    println("[IPC Recvmsg] timeout disabled")
-                    continue
-                }
-                println("[IPC Recvmsg] timeout")
+            sock.tcp_chans.control_chan <- op
+            if sock.option_fd_nonblock {
                 res_msg := IpcMsgError {
-                    IpcMsgBase : msg.IpcMsgBase
-                    rc : -1
-                    err : C.EAGAIN
+                    IpcMsgBase: msg.IpcMsgBase
+                    rc: 0
                 }
                 ipc_sock.write(res_msg.to_bytes()) ?
+                println("[IPC Connect] connect done")
                 return
             }
-            */
         }
-        expected_flags := tcp_syn|tcp_ack
-        recv_tcp_hdr := pkt.l4_hdr.get_tcp_hdr()?
-        if recv_tcp_hdr.control_flags & expected_flags != expected_flags {
-            panic("UNEXPECTED PACKET")
-        }
-        println("[TCP] SYNACK Received")
-        tcp_hdr.seq_num += 1
-        tcp_hdr.ack_num = recv_tcp_hdr.seq_num + 1
-        tcp_hdr.control_flags = u8(tcp_ack)
-        pkt.l4_hdr = tcp_hdr
-        pkt.payload = []byte{}
-        nd.send_ipv4(mut pkt, &dst_addr, ttl)?
-        res_msg := IpcMsgError {
-            IpcMsgBase : msg.IpcMsgBase
-            rc : 0
-        }
-        println("[IPC Connect] connect success")
-        ipc_sock.write(res_msg.to_bytes()) ?
     }
-
 }
 
-fn (shared sock Socket) handle_sockname(msg &IpcMsgSockname, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_getsockname(msg &IpcMsgSockname, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Sockname] ${msg.to_string()}")
-
-    if msg.msg_type != C.IPC_GETSOCKNAME {
-        return
-    }
 
     mut sockaddr := SockAddrIn {
         family: u16(C.AF_INET)
@@ -298,8 +279,47 @@ fn (shared sock Socket) handle_sockname(msg &IpcMsgSockname, mut ipc_sock unix.S
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
-fn (shared sock Socket) handle_close(msg &IpcMsgClose, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_getpeername(msg &IpcMsgSockname, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
+    println("[IPC Getpeername] ${msg.to_string()}")
+
+    mut sock_type := 0
+    rlock sock {
+        sock_type = sock.sock_type
+    }
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
+        }
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
+        return
+    }
+}
+
+fn (nd &NetDevice) handle_close(msg &IpcMsgClose, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Close] ${msg.to_string()}")
+    mut sock_type := int(0)
+    rlock sock {
+        sock_type = sock.sock_type
+    }
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
+        }
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
+    }
+
     mut res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase
         rc : 0
@@ -310,8 +330,25 @@ fn (shared sock Socket) handle_close(msg &IpcMsgClose, mut ipc_sock unix.StreamC
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
-fn (shared sock Socket) handle_getsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_getsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Getsockopt] ${msg.to_string()}")
+    mut sock_type := 0
+    rlock sock {
+        sock_type = sock.sock_type
+    }
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
+        }
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
+        return
+    }
 
     mut res_sockopt := IpcMsgSockopt {
         IpcMsgBase : msg.IpcMsgBase
@@ -351,7 +388,7 @@ fn (shared sock Socket) handle_getsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
-fn (shared sock Socket) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Setsockopt] ${msg.to_string()}")
 
     mut res_msg := IpcMsgError {
@@ -538,11 +575,11 @@ fn (shared sock Socket) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
-fn (shared sock Socket) handle_write(msg &IpcMsgWrite, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_write(msg &IpcMsgWrite, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Write] ${msg.to_string()}")
 }
 
-fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Sendto] ${msg.to_string()}")
 
     mut domain := 0
@@ -564,12 +601,10 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
         println("[IPC Sendto] Send From IPv4 Layer")
         mut addr := SockAddrIn{}
         match msg.addr.addr {
-            SockAddrBase {
-
-            }
             SockAddrIn {
                 addr = msg.addr.addr
             }
+            else {}
         }
         dest_addr := AddrInfo {
             ipv4: addr.sin_addr
@@ -599,15 +634,31 @@ fn (shared sock Socket) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.Strea
         }
         res_msg_bytes := res_msg.to_bytes()
         ipc_sock.write(res_msg_bytes) ?
-        mut s := ""
-        for i := 0; i < 6; i += 1 {
-            s += "0x${res_msg_bytes[i]:02X} "
+        return
+    }
+
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
         }
-        println(s)
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : int(msg.len)
+            err : 0
+        }
+        ipc_sock.write(res_msg.to_bytes()) ?
+        return
     }
 }
 
-fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Recvmsg] ${msg.to_string()}")
 
     println("[IPC Recvmsg] try to get packet")
@@ -720,8 +771,26 @@ fn (shared sock Socket) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.Str
 }
 
 
-fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Poll] ${msg.to_string()}")
+
+    mut sock_type := 0
+    rlock sock {
+        sock_type = sock.sock_type
+    }
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
+        }
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
+        return
+    }
 
     mut res := *msg
     mut rc := 0
@@ -733,14 +802,20 @@ fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamCon
                 pkt = <- sock.sock_chans.read_chan {
                     sock.sock_chans.read_chan <- pkt
                     fd.revents |= u16(C.POLLIN)
-                    rc += 1
                 }
                 msg.timeout * time.millisecond {
                 }
             }
         }
+        if fd.events & u16(C.POLLOUT | C.POLLWRNORM) > 0 {
+        }
     }
 
+    for fd in res.fds {
+        if fd.revents > 0 {
+            rc += 1
+        }
+    }
     res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase
         rc : rc
@@ -751,7 +826,7 @@ fn (shared sock Socket) handle_poll(msg &IpcMsgPoll, mut ipc_sock unix.StreamCon
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
-fn (shared sock Socket) handle_fcntl(msg &IpcMsgFcntl, mut ipc_sock unix.StreamConn, nd &NetDevice, shared sock_shared SocketShared) ? {
+fn (nd &NetDevice) handle_fcntl(msg &IpcMsgFcntl, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Fcntl] ${msg.to_string()}")
 
     if msg.cmd == C.F_GETFL {
@@ -802,6 +877,28 @@ fn (shared sock Socket) handle_fcntl(msg &IpcMsgFcntl, mut ipc_sock unix.StreamC
         }
         println("[IPC Fcntl] F_SETFL success")
         ipc_sock.write(res_msg.to_bytes())?
+        return
+    }
+}
+
+fn (nd &NetDevice) handle_read(msg &IpcMsgRead, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
+    println("[IPC Read] ${msg.to_string()}")
+
+    mut sock_type := 0
+    rlock sock {
+        sock_type = sock.sock_type
+    }
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
+        }
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
         return
     }
 }

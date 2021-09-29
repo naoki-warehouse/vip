@@ -1,7 +1,7 @@
 module main
 
 #include <netinet/tcp.h>
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgPoll | IpcMsgFcntl
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgRead | IpcMsgPoll | IpcMsgFcntl
 
 struct IpcMsg {
     msg IpcMsgType
@@ -72,6 +72,14 @@ struct IpcMsgSendto {
     addrlen u32
 mut:
     addr SockAddr
+    len u64
+    buf []byte
+}
+
+struct IpcMsgRead {
+    IpcMsgBase
+    sockfd int
+mut:
     len u64
     buf []byte
 }
@@ -183,6 +191,9 @@ fn socket_optname_to_string(opt int) string {
     if opt == C.SO_KEEPALIVE {
         return "SO_KEEPALIVE"
     }
+    if opt == C.SO_ERROR {
+        return "SO_ERROR"
+    }
     return "$opt"
 }
 
@@ -215,21 +226,24 @@ fn tcp_optname_to_string(opt int) string {
 fn events_to_string(events u16) string {
     mut s := ""
     mut e := events
-    for {
-        old_e := e
-        if e & u16(C.POLLIN) > 0 {
-            s += "|POLLIN"
-            e &= ~u16(C.POLLIN)
-        }
 
-        if e == 0 {
-            break
-        }
+    if e & u16(C.POLLIN) > 0 {
+        s += "|POLLIN"
+        e &= ~u16(C.POLLIN)
+    }
 
-        if old_e == e {
-            s += " 0x${e}"
-            break
-        }
+    if e & u16(C.POLLOUT) > 0 {
+        s += "|POLLOUT"
+        e &= ~u16(C.POLLOUT)
+    }
+
+    if e & u16(C.POLLWRNORM) > 0 {
+        s += "|POLLWRNORM"
+        e &= ~u16(C.POLLWRNORM)
+    }
+
+    if e != 0 {
+        s += " 0x${e}"
     }
 
     if s == "" {
@@ -280,7 +294,7 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
     }
 
-    if base.msg_type == C.IPC_GETSOCKNAME {
+    if base.msg_type == C.IPC_GETSOCKNAME || base.msg_type == C.IPC_GETPEERNAME {
         assert buf.len >= 142
         return IpcMsg {
             msg: IpcMsgSockname {
@@ -339,6 +353,9 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
         msg.addr = parse_sockaddr(buf[18..18 + int(msg.addrlen)]) ?
         mut offset := 18 + int(msg.addrlen)
+        if msg.addrlen == 0 {
+            offset += 16
+        }
         msg.len = bytes_to_u64(buf[offset..offset+8]) ?
         offset += 8
         msg.buf = buf[offset..u64(offset) + msg.len]
@@ -362,6 +379,18 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         }
         return IpcMsg {
             msg: msg
+        }
+    }
+
+    if base.msg_type == C.IPC_READ {
+        assert buf.len >= 18
+        mut msg := IpcMsgRead {
+            IpcMsgBase : base
+            sockfd : bytes_to_int(buf[6..10]) ?
+            len : bytes_to_u64(buf[10..18]) ?
+        }
+        return IpcMsg {
+            msg : msg
         }
     }
 
@@ -489,6 +518,17 @@ fn (im IpcMsgRecvmsg) to_bytes() ?[]byte {
     return base_bytes
 }
 
+fn (im IpcMsgRead) to_bytes() []byte {
+    mut base_bytes := im.IpcMsgBase.to_bytes()
+    mut buf := []byte{len:12 + int(im.len)}
+    copy(buf[0..4], int_to_bytes(im.sockfd))
+    copy(buf[4..12], u64_to_bytes(im.len))
+    copy(buf[12..], im.buf)
+    
+    base_bytes << buf
+    return base_bytes
+}
+
 fn (im IpcMsgPoll) to_bytes() []byte {
     mut base_bytes := im.IpcMsgBase.to_bytes()
     mut buf := []byte{len:12 + int(im.nfds*8)}
@@ -586,6 +626,14 @@ fn (im IpcMsgRecvmsg) to_string() string {
     s += "msg_controllen:${im.msg_controllen} "
     s += "msg_iovlen:${im.msg_iovlen} "
     s += "msg:iovs_len:${im.msg_iovs_len}"
+
+    return s
+}
+
+fn (im IpcMsgRead) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "sockfd:${im.sockfd} "
+    s += "len:${im.len}"
 
     return s
 }

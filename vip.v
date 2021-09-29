@@ -326,7 +326,7 @@ fn (nd NetDevice) handle_tcp(pkt &Packet, tcp_hdr &TcpHdr) {
         rlock sock {
             if !(sock.domain == C.AF_INET &&
                sock.sock_type == C.SOCK_STREAM &&
-               sock.protocol == C.IPPROTO_IP) {
+               (sock.protocol == C.IPPROTO_IP || sock.protocol == C.IPPROTO_TCP)) {
                 continue
             }
 
@@ -339,7 +339,7 @@ fn (nd NetDevice) handle_tcp(pkt &Packet, tcp_hdr &TcpHdr) {
             }
 
             println("[TCP] handling sock(fd:${sock.fd})")
-            res := sock.sock_chans.read_chan.try_push(*pkt)
+            res := sock.tcp_chans.read_chan.try_push(*pkt)
             println("[TCP] handle sock(fd:${sock.fd})")
             println("[TCP] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
             if res != .success {
@@ -630,6 +630,9 @@ fn main() {
     netdev.print()
 
     shared sock_shared := SocketShared {}
+    lock sock_shared {
+        sock_shared.tcp_port_base += u16(rand.int() % 200)
+    }
 
     netdev.threads << go netdev.arp_table_chans.arp_table_thread(&netdev.my_mac, &netdev.my_ip)
     netdev.threads << go netdev.handle_control_usock("/tmp/vip.sock")
@@ -640,9 +643,14 @@ fn main() {
             ipc_sock := <- netdev.ipc_sock_chan {
                 shared sock := Socket {
                     sock_chans : new_socket_chans()
+                    tcp_chans : new_tcp_socket_chans()
                 }
-                netdev.socks << sock
-                netdev.threads << go sock.handle_data(ipc_sock, &netdev, shared sock_shared)
+                tcp_thread := go (&netdev).handle_tcp_sock(shared sock)
+                lock sock {
+                    sock.tcp_thread << tcp_thread
+                }
+                netdev.socks << shared sock
+                netdev.threads << go (&netdev).handle_data(ipc_sock, shared sock, shared sock_shared)
             }
             mut pkt := <- netdev.lo_chan {
                 pkt.timestamp = time.utc()
