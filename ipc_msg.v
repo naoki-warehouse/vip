@@ -1,7 +1,7 @@
 module main
 
 #include <netinet/tcp.h>
-type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgRead | IpcMsgPoll | IpcMsgFcntl
+type IpcMsgType = IpcMsgBase | IpcMsgSocket | IpcMsgConnect | IpcMsgSockname | IpcMsgClose | IpcMsgSockopt | IpcMsgWrite | IpcMsgSendto | IpcMsgRecvmsg | IpcMsgRead | IpcMsgPoll | IpcMsgFcntl | IpcMsgIoctl
 
 struct IpcMsg {
     msg IpcMsgType
@@ -129,6 +129,13 @@ struct IpcMsgFcntl {
     data []byte
 }
 
+struct IpcMsgIoctl {
+    IpcMsgBase
+    sockfd int
+    request u64
+    cmd int
+}
+
 fn domain_to_string(domain int) string {
     if domain == C.AF_INET {
         return "AF_INET"
@@ -194,6 +201,9 @@ fn socket_optname_to_string(opt int) string {
     if opt == C.SO_ERROR {
         return "SO_ERROR"
     }
+    if opt == C.SO_OOBINLINE {
+        return "SO_OOBINLINE"
+    }
     return "$opt"
 }
 
@@ -206,6 +216,9 @@ fn ip_optname_to_string(opt int) string {
     }
     if opt == C.IP_RETOPTS {
         return "IP_RETOPTS"
+    }
+    if opt == C.IP_TOS {
+        return "IP_TOS"
     }
     return "$opt"
 }
@@ -262,6 +275,14 @@ fn fcntl_cmd_to_string(cmd int) string {
     }
 
     return "$cmd"
+}
+
+fn ioctl_request_to_string(request u64) string {
+    if request == C.FIONBIO {
+        return "FIONBIO"
+    }
+
+    return "$request"
 }
 
 fn parse_ipc_msg(buf []byte) ?IpcMsg {
@@ -427,6 +448,20 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
         return IpcMsg {
             msg:msg
         }
+    }
+
+    if base.msg_type == C.IPC_IOCTL {
+        msg := IpcMsgIoctl {
+            IpcMsgBase: base
+            sockfd: bytes_to_int(buf[6..10]) ?
+            request: bytes_to_u64(buf[10..18]) ?
+            cmd: bytes_to_int(buf[18..22]) ?
+        }
+
+        return IpcMsg {
+            msg:msg
+        }
+
     }
 
     return IpcMsg {
@@ -654,6 +689,15 @@ fn (im IpcMsgFcntl) to_string() string {
     mut s := im.IpcMsgBase.to_string() + " "
     s += "sockfd:${im.sockfd} "
     s += "cmd:${fcntl_cmd_to_string(im.cmd)}"
+
+    return s
+}
+
+fn (im IpcMsgIoctl) to_string() string {
+    mut s := im.IpcMsgBase.to_string() + " "
+    s += "sockfd:${im.sockfd} "
+    s += "request:${ioctl_request_to_string(im.request)} "
+    s += "cmd:${im.cmd}"
 
     return s
 }

@@ -115,7 +115,7 @@ static int free_socket(int lvlfd)
 
 static int transmit_lvlip(int lvlfd, struct ipc_msg *msg, int msglen)
 {
-    char buf[RCBUF_LEN];
+    static char buf[RCBUF_LEN];
 
     // Send mocked syscall to lvl-ip
     if (_write(lvlfd, (char *)msg, msglen) == -1) {
@@ -635,12 +635,158 @@ int ppoll(struct pollfd *fds, nfds_t nfds,
     return -1;
 }
 
+
 int select(int nfds, fd_set *restrict readfds,
            fd_set *restrict writefds, fd_set *restrict errorfds,
            struct timeval *restrict timeout)
 {
-    print_err("Select not implemented yet\n");
-    return _select(nfds, readfds, writefds, errorfds, timeout);
+
+    lvl_dbg("Select called");
+
+    int kernel_fds_cnt = 0;
+    int kernel_fd_max =0;
+
+    struct pollfd lvlip_fds[10];
+    int lvlip_fds_cnt = 0;
+    for (int i = 0; i < nfds; i++)
+    {
+        if (lvlip_get_sock(i) != NULL){
+            short int flag = 0;
+            if (readfds != NULL && FD_ISSET(i, readfds)) {
+                flag |= POLLIN;
+                FD_CLR(i, readfds);
+            }
+            if (writefds != NULL && FD_ISSET(i, writefds)) {
+                flag |= POLLOUT;
+                FD_CLR(i, writefds);
+            }
+            if (errorfds != NULL && FD_ISSET(i, errorfds)) {
+                FD_CLR(i, errorfds);
+            }
+            if (flag != 0){
+                lvlip_fds[lvlip_fds_cnt].fd = i;
+                lvlip_fds[lvlip_fds_cnt].events = flag;
+                lvlip_fds_cnt += 1;
+            }
+        } else {
+            bool is_set = false;
+            if (readfds != NULL && FD_ISSET(i, readfds)) {
+                is_set = true;
+            }
+            if (writefds != NULL && FD_ISSET(i, writefds)) {
+                is_set = true;
+            }
+            if (errorfds != NULL && FD_ISSET(i, errorfds)) {
+                is_set = true;
+            }
+            if (is_set) {
+                kernel_fds_cnt += 1;
+                kernel_fd_max = i;
+            }
+        }
+    }
+
+    int kernel_res = 0;
+    int lvlip_res = 0;
+    if (timeout != NULL) {
+        if (kernel_fds_cnt > 0) {
+            kernel_res = _select(kernel_fd_max+1, readfds, writefds, errorfds, timeout);
+            if (kernel_res < 0) {
+                perror("select kernel");
+            }
+        }
+        if (lvlip_fds_cnt > 0) {
+            poll(lvlip_fds, lvlip_fds_cnt, 0);
+            for (int i=0; i < lvlip_fds_cnt; i++){
+                struct pollfd lvlip_fd = lvlip_fds[i];
+                if (lvlip_fd.revents & POLLIN) {
+                    FD_SET(lvlip_fd.fd, readfds);
+                    lvlip_res += 1;
+                }
+                if (lvlip_fd.revents & POLLOUT) {
+                    FD_SET(lvlip_fd.fd, writefds);
+                    lvlip_res += 1;
+                }
+            }
+        }
+        int rc = kernel_res + lvlip_res;
+        return rc;
+    }
+
+    fd_set *kernel_read_fds = NULL;
+    fd_set *kernel_write_fds = NULL;
+    fd_set *kernel_error_fds = NULL;
+
+    if (readfds != NULL) {
+        kernel_read_fds = malloc(sizeof(fd_set));
+        FD_ZERO(kernel_read_fds);
+    }
+
+    if (writefds != NULL) {
+        kernel_write_fds = malloc(sizeof(fd_set));
+        FD_ZERO(kernel_write_fds);
+    } 
+
+    if (errorfds != NULL) {
+        kernel_error_fds = malloc(sizeof(fd_set));
+        FD_ZERO(kernel_error_fds);
+    }
+
+    int rc = 0;
+    for (;;) {
+        lvl_dbg("Select infinte loop");
+        if (readfds != NULL) 
+            memcpy(kernel_read_fds, readfds, sizeof(fd_set));
+        if (writefds != NULL)
+            memcpy(kernel_write_fds, writefds, sizeof(fd_set));
+        if (errorfds != NULL)
+            memcpy(kernel_error_fds, errorfds, sizeof(fd_set));
+        if (kernel_fds_cnt > 0) {
+            struct timeval timeout_sec;
+            timeout_sec.tv_sec = 0;
+            timeout_sec.tv_usec = 500*1000;
+            kernel_res = _select(kernel_fd_max+1, kernel_read_fds, kernel_write_fds, kernel_error_fds, &timeout_sec);
+            if (kernel_res < 0) {
+                perror("select kernel");
+            }
+        }
+        if (kernel_res > 0) {
+            if (readfds != NULL)
+                memcpy(readfds, kernel_read_fds, sizeof(fd_set));
+            if (writefds != NULL)
+                memcpy(writefds, kernel_write_fds, sizeof(fd_set));
+            if (errorfds != NULL)
+                memcpy(errorfds, kernel_error_fds, sizeof(fd_set));
+        }
+        lvl_dbg("Select infinte loop2");
+        if (lvlip_fds_cnt > 0) {
+            poll(lvlip_fds, lvlip_fds_cnt, 100);
+            for (int i=0; i < lvlip_fds_cnt; i++){
+                struct pollfd lvlip_fd = lvlip_fds[i];
+                if (lvlip_fd.revents & POLLIN) {
+                    FD_SET(lvlip_fd.fd, readfds);
+                    lvlip_res += 1;
+                }
+                if (lvlip_fd.revents & POLLOUT) {
+                    FD_SET(lvlip_fd.fd, writefds);
+                    lvlip_res += 1;
+                }
+            }
+        }
+        rc = kernel_res + lvlip_res;
+        if (rc != 0) {
+            break;
+        }
+    }
+
+    if (kernel_read_fds != NULL) 
+        free(kernel_read_fds);
+    if (kernel_write_fds != NULL) 
+        free(kernel_write_fds);
+    if (kernel_error_fds != NULL) 
+        free(kernel_error_fds);
+    lvl_dbg("Select success rc:%d", rc);
+    return rc;
 }
 
 
@@ -669,7 +815,8 @@ int setsockopt(int fd, int level, int optname,
 
     memcpy(msg->data, &opts, sizeof(struct ipc_sockopt));
     memcpy(((struct ipc_sockopt *)msg->data)->optval, optval, optlen);
-    return transmit_lvlip(sock->lvlfd, msg, msglen);
+    int rc = transmit_lvlip(sock->lvlfd, msg, msglen);
+    return rc;
 }
 
 int getsockopt(int fd, int level, int optname,
@@ -922,6 +1069,7 @@ int fcntl(int fildes, int cmd, ...)
 
 int ioctl(int fd, unsigned long int request, ...)
 {
+    int rc = -1;
     va_list ap;
     void *arg;
 
@@ -936,8 +1084,38 @@ int ioctl(int fd, unsigned long int request, ...)
     }
 
     lvl_sock_dbg("Ioctl called", sock);
+    
+    int pid = getpid();
+    int msglen = sizeof(struct ipc_msg) + sizeof(struct ipc_ioctl);
+    struct ipc_msg *msg = alloca(msglen);
 
-    return -1;
+    msg->type = IPC_IOCTL;
+    msg->pid = pid;
+
+    struct ipc_ioctl *ic = (struct ipc_ioctl *)msg->data;
+    ic->sockfd = fd;
+    ic->request = request;
+    switch (request) {
+        case FIONBIO:
+            lvl_sock_dbg("Ioctl FIONBIO", sock);
+
+            va_start(ap, request);
+
+            ic->cmd = *va_arg(ap, int*);
+
+
+            va_end(ap);
+
+            rc = transmit_lvlip(sock->lvlfd, msg, msglen);
+            break; 
+        default:
+            print_err("ioctl %lu is not supported", request);
+            rc = -1;
+            errno = EINVAL;
+            break;
+    }
+
+    return rc;
 }
 
 int __libc_start_main(int (*main) (int, char * *, char * *), int argc,

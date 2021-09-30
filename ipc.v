@@ -25,8 +25,10 @@ mut:
     rcvbuf_size int = 87380
     rcv_timeout time.Duration
     option_timestamp_old bool
-    option_tcp_nodelay bool
     option_socket_keepalive bool
+    option_socket_oobinline bool
+    option_ip_tos int
+    option_tcp_nodelay bool
     option_tcp_keepidle int
     option_tcp_keepintvl int
     option_fd_nonblock bool
@@ -130,6 +132,9 @@ fn (nd &NetDevice) handle_data(ipc_sock IpcSocket, shared sock Socket, shared so
             IpcMsgRead {
                 nd.handle_read(&msg, mut conn, shared sock, shared sock_shared) or { continue }
             }
+            IpcMsgIoctl {
+                nd.handle_ioctl(&msg, mut conn, shared sock, shared sock_shared) or { continue }
+            }
         }
     }
 
@@ -232,20 +237,19 @@ fn (nd &NetDevice) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.StreamCo
         }
     } else if sock_type == C.SOCK_STREAM {
         rlock sock {
-            op := TcpOps {
+            mut op := TcpOps {
                 msg: IpcMsg{msg: msg}
                 ipc_sock: ipc_sock
             }
             sock.tcp_chans.control_chan <- op
-            if sock.option_fd_nonblock {
-                res_msg := IpcMsgError {
-                    IpcMsgBase: msg.IpcMsgBase
-                    rc: 0
-                }
-                ipc_sock.write(res_msg.to_bytes()) ?
-                println("[IPC Connect] connect done")
-                return
+            op = <- sock.tcp_chans.control_chan
+            res_msg := IpcMsgError {
+                IpcMsgBase: msg.IpcMsgBase
+                rc: 0
             }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            println("[IPC Connect] connect done")
+            return
         }
     }
 }
@@ -450,6 +454,17 @@ fn (nd &NetDevice) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Strea
             ipc_sock.write(res_msg.to_bytes()) ?
             return
         }
+
+        if msg.optname == C.IP_TOS {
+            assert msg.optlen == 4
+            tos_val := bytes_to_int(msg.optval[0..4]) ?
+            lock sock {
+                sock.option_ip_tos = tos_val
+            }
+            println("[IPC Setsockopt] Configured ip tos (value:${tos_val})")
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
     } else if msg.level == C.SOL_SOCKET {
         if msg.optname == C.SO_SNDBUF {
             assert msg.optlen == 4
@@ -524,6 +539,23 @@ fn (nd &NetDevice) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Strea
                 println("[IPC Setsockopt] Disable socket keepalive")
                 lock sock {
                     sock.option_socket_keepalive = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.SO_OOBINLINE {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable socket oobinline")
+                lock sock {
+                    sock.option_socket_oobinline = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable socket oobinline")
+                lock sock {
+                    sock.option_socket_oobinline = false
                 }
             }
             ipc_sock.write(res_msg.to_bytes()) ?
@@ -899,6 +931,29 @@ fn (nd &NetDevice) handle_read(msg &IpcMsgRead, mut ipc_sock unix.StreamConn, sh
         rlock sock {
             <- sock.tcp_chans.control_chan 
         }
+        return
+    }
+}
+
+fn (nd &NetDevice) handle_ioctl(msg &IpcMsgIoctl, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
+    println("[IPC Ioctl] ${msg.to_string()}")
+    if msg.request == C.FIONBIO {
+        if msg.cmd > 0 {
+            println("[IPC Ioctl] FIONBIO enable nonblock")
+            lock sock {
+                sock.option_fd_nonblock = true
+            }
+        } else {
+            println("[IPC Ioctl] FIONBIO disable nonblock")
+            lock sock {
+                sock.option_fd_nonblock = false
+            }
+        }
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+        }
+        println("[IPC Ioctl] FIONBIO success")
+        ipc_sock.write(res_msg.to_bytes())?
         return
     }
 }

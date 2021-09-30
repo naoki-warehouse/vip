@@ -104,7 +104,8 @@ fn (mut fp IPv4FragmentPackets) retrieve(id u16) ?Packet {
 
 struct SocketShared {
 mut:
-    fd_base int = 4097
+    //fd_base int = 4097
+    fd_base int = 100
     udp_port_base u16 = 49152
     tcp_port_base u16 = 49152
 }

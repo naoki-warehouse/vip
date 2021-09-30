@@ -29,6 +29,7 @@ void *start_ipc_listener();
 #define IPC_GETSOCKNAME 0x000B
 #define IPC_SENDTO      0x000C
 #define IPC_RECVMSG     0x000D
+#define IPC_IOCTL       0x000E
 
 struct ipc_thread {
     struct list_head list;
@@ -137,5 +138,11 @@ struct ipc_sockname {
     socklen_t address_len;
     uint8_t sa_data[128];
 };
+
+struct ipc_ioctl {
+    int sockfd;
+    uint64_t request;
+    int cmd;
+} __attribute__((packed));
 
 #endif
