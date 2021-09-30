@@ -390,6 +390,7 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, addr &AddrInfo, ttl int) ? {
         }
         UdpHdr {
             l4_size = l4_hdr.len() + pkt.payload.len
+            l4_hdr.chksum = 0
             ipv4_hdr.protocol = byte(IPv4Protocol.udp)
             ph := PseudoHdr {
                 src_ip : nd.my_ip,
@@ -404,6 +405,7 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, addr &AddrInfo, ttl int) ? {
         }
         TcpHdr {
             l4_size = l4_hdr.data_offset + pkt.payload.len
+            l4_hdr.chksum = 0
             ipv4_hdr.protocol = byte(IPv4Protocol.tcp)
             ph := PseudoHdr {
                 src_ip : nd.my_ip,

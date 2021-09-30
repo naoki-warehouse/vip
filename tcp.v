@@ -266,10 +266,118 @@ mut:
     seq_num u32
     ack_num u32
     mss int = 1400
-    recv_data []byte
-    recv_data_head_num u32
+    recv_ring TcpRingBuffer
     send_data []byte
     send_data_base_num u32
+    last_send_pkt Packet
+    retransmit bool
+}
+
+struct TcpRingBuffer {
+mut:
+    data []byte
+    bitmap []bool
+    base_seq_num u32
+    read_idx_base int
+}
+
+fn new_tcp_ring_buffer(buffer_size int, init_seq_num u32) TcpRingBuffer {
+    return TcpRingBuffer {
+        data: []byte{len:buffer_size}
+        bitmap: []bool{len:buffer_size}
+        base_seq_num: init_seq_num
+    }
+} 
+
+fn (mut r TcpRingBuffer) write(seq_num u32, write_data []byte) ? {
+    if write_data.len >= r.data.len {
+        return error("write data over buffer length")
+    }
+    mut write_idx := int(0)
+    if seq_num > r.base_seq_num {
+        write_idx = int(seq_num - r.base_seq_num)
+    } else {
+        write_idx = int(u64(0x100000000) - u64(r.base_seq_num - seq_num))
+    }
+    write_idx = (write_idx + r.read_idx_base) % r.data.len
+    println("Write seq ${seq_num} at ${write_idx} size ${write_data.len}")
+
+    mut init := true
+    for d in write_data {
+        if !init && write_idx == r.read_idx_base {
+            return error("buffer is full!!")
+        }
+        r.data[write_idx] = d
+        r.bitmap[write_idx] = true
+        write_idx = (write_idx + 1) % r.data.len
+        init = false
+    }
+}
+
+fn (mut r TcpRingBuffer) read(max_size int) []byte {
+    mut buf := []byte{}
+    read_idx_base := r.read_idx_base
+    for i := read_idx_base; i < max_size; i += 1 {
+        idx := i % r.data.len
+        if r.bitmap[idx] {
+            r.bitmap[idx] = false
+            r.read_idx_base = (idx + 1) % r.data.len
+            r.base_seq_num += 1
+            buf << r.data[idx]
+        } else {
+            break
+        }
+    }
+
+    return buf
+}
+
+fn (r &TcpRingBuffer) get_ack_num() u32 {
+    return r.base_seq_num + u32(r.get_readable_size())
+}
+
+fn (r &TcpRingBuffer) get_readable_size() int {
+    mut readable_size := 0
+    for i := 0; i < r.data.len; i += 1 {
+        read_idx := (r.read_idx_base + i) % r.data.len
+        if !r.bitmap[read_idx] {
+            break
+        }
+        readable_size += 1
+    }
+    return readable_size
+}
+
+fn (r &TcpRingBuffer) is_partially_lost() bool {
+    mut continuous := true
+    for i := 0; i < r.data.len; i += 1 {
+        read_idx := (r.read_idx_base + i) % r.data.len
+        if !r.bitmap[read_idx] && continuous {
+            continuous = false
+        }
+
+        if r.bitmap[read_idx] && !continuous {
+            return true
+        }
+    }
+
+    return false
+}
+
+fn (r &TcpRingBuffer) get_used_size() int {
+    mut used_size := 0
+    for i := 0; i < r.data.len; i += 1 {
+        read_idx := (r.read_idx_base + i) % r.data.len
+        if r.bitmap[read_idx] {
+            used_size += 1
+        }
+    }
+
+    return used_size
+}
+
+fn (r &TcpRingBuffer) get_free_size() int {
+    return r.data.len - r.get_used_size()
 }
 
 fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
@@ -282,14 +390,16 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
         state: TcpState.closed
     }
     for {
+        mut port := u16(0)
+        mut ttl := 0
+        mut nodelay := false
+        rlock sock {
+            port = sock.port
+            ttl = sock.ttl
+            nodelay = sock.option_tcp_nodelay
+        }
         select {
             pkt := <- sock_chan.read_chan {
-                mut port := u16(0)
-                mut ttl := 0
-                rlock sock {
-                    port = sock.port
-                    ttl = sock.ttl
-                }
                 recv_ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
                 recv_tcp_hdr := pkt.l4_hdr.get_tcp_hdr() or {continue}
                 if recv_ipv4_hdr.src_addr.to_string() != session.peer_addr.ipv4.to_string() {
@@ -308,6 +418,7 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                     println("[TCP $fd] SYNACK received(SEQ_NUM:${recv_tcp_hdr.seq_num} ACK_NUM:${recv_tcp_hdr.ack_num})")
                     session.seq_num = recv_tcp_hdr.ack_num
                     session.ack_num = recv_tcp_hdr.seq_num + 1
+                    session.recv_ring = new_tcp_ring_buffer(20000, session.ack_num)
                     mut tcp_hdr := TcpHdr {
                         src_port : port
                         dst_port : session.peer_addr.port
@@ -315,13 +426,13 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                         ack_num : session.ack_num
                         data_offset : 20
                         control_flags : u8(tcp_ack)
-                        window_size: 4000
+                        window_size: u16(session.recv_ring.get_free_size())
                     }
                     mut send_pkt := Packet{}
                     send_pkt.l4_hdr = tcp_hdr
                     nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                    session.last_send_pkt = pkt
                     session.send_data_base_num = session.seq_num
-                    session.recv_data_head_num = session.ack_num
                     session.state = TcpState.established
                     println("[TCP $fd] Session established")
                 } else if session.state == TcpState.established {
@@ -331,22 +442,23 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                         if session.seq_num > session.send_data_base_num {
                             buf_idx = int(session.seq_num - session.send_data_base_num)
                         } else {
-                            buf_idx = int(u64(1 << 32) - u64(session.send_data_base_num - session.seq_num))
+                            buf_idx = int(u64(0x100000000) - u64(session.send_data_base_num - session.seq_num))
                         }
                         session.send_data = session.send_data[buf_idx..]
                         session.send_data_base_num = session.seq_num
                         println("[TCP $fd] Recv ack for send data(size:${buf_idx})")
                     }
-                    if recv_tcp_hdr.seq_num == session.ack_num {
-                        session.recv_data << pkt.payload
-                        session.ack_num = recv_tcp_hdr.seq_num + u32(pkt.payload.len)
-                        println("[TCP $fd] Recv data(size:${pkt.payload.len})")
-                    }
+
+                    session.recv_ring.write(recv_tcp_hdr.seq_num, pkt.payload) or {println("buffer corrupt!")}
+                    println("[TCP $fd] Recv data(size:${pkt.payload.len})")
+                    println("[TCP $fd] Readable size:${session.recv_ring.get_readable_size()}")
+                    session.ack_num = session.recv_ring.get_ack_num()
+
                     if recv_tcp_hdr.control_flags & tcp_fin > 0 {
                         session.state = TcpState.close_wait
                         session.ack_num += 1
                     }
-                    if recv_tcp_hdr.control_flags & tcp_psh > 0 {
+                    if (recv_tcp_hdr.control_flags & tcp_psh > 0 || nodelay) && (pkt.payload.len > 0) {
                         mut tcp_hdr := TcpHdr {
                             src_port : port
                             dst_port : session.peer_addr.port
@@ -354,11 +466,13 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                             ack_num : session.ack_num
                             data_offset : 20
                             control_flags : u8(tcp_ack)
-                            window_size: 4000
+                            window_size: u16(session.recv_ring.get_free_size())
                         }
                         mut send_pkt := Packet{}
                         send_pkt.l4_hdr = tcp_hdr
                         nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                        session.last_send_pkt = send_pkt
+                        session.retransmit = session.recv_ring.is_partially_lost()
                         continue
                     }
                 }
@@ -430,7 +544,11 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                     else {}
                 }
             }
-            500 * time.millisecond {
+            100 * time.millisecond {
+                if session.retransmit && session.state != TcpState.closed {
+                    println("[TCP $fd] Retransmission")
+                    nd.send_ipv4(mut session.last_send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                }
             }
         }
     }
@@ -466,6 +584,7 @@ fn (nd &NetDevice) tcp_connect(msg &IpcMsgConnect, mut session TcpSession, share
     nd.send_ipv4(mut pkt, &dst_addr, ttl)?
     session.state = TcpState.syn_sent
     session.peer_addr = dst_addr
+    session.last_send_pkt = pkt
 }
 
 fn (nd &NetDevice) tcp_poll(msg &IpcMsgPoll, session &TcpSession, mut ipc_sock unix.StreamConn,  shared sock Socket) ? {
@@ -479,7 +598,7 @@ fn (nd &NetDevice) tcp_poll(msg &IpcMsgPoll, session &TcpSession, mut ipc_sock u
             }
         }
         if fd.events & u16(C.POLLIN) > 0 {
-            if session.state != TcpState.closed && session.recv_data.len > 0 {
+            if session.state != TcpState.closed && session.recv_ring.get_readable_size() > 0 {
                 fd.revents |= fd.events & u16(C.POLLIN)
             }
         }
@@ -586,27 +705,22 @@ fn (nd &NetDevice) tcp_sendto(msg &IpcMsgSendto, mut session &TcpSession, shared
         send_pkt.payload = msg.buf[i..i+data_size]
         session.send_data << msg.buf[i..i+data_size]
         nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl)?
+        session.last_send_pkt = send_pkt
+        session.retransmit = true
     }
 }
 
 fn (nd &NetDevice) tcp_read(msg &IpcMsgRead, mut session TcpSession, mut ipc_sock unix.StreamConn, shared sock Socket) ? {
     mut res := *msg
 
-    mut read_size := session.recv_data.len
-    if read_size > msg.len {
-        read_size = int(msg.len)
-    }
-
-    res.buf = session.recv_data[0..read_size]
+    res.buf = session.recv_ring.read(int(msg.len))
     res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase
-        rc : read_size
+        rc : res.buf.len
         err : 0
         data : res.to_bytes()[msg.IpcMsgBase.len..]
     }
     ipc_sock.write(res_msg.to_bytes()) ?
-
-    session.recv_data = session.recv_data[read_size..]
 }
 
 fn (nd &NetDevice) tcp_close(msg &IpcMsgClose, mut session TcpSession, sock_chan &TcpSocketChans, shared sock Socket) ? {
@@ -629,6 +743,7 @@ fn (nd &NetDevice) tcp_close(msg &IpcMsgClose, mut session TcpSession, sock_chan
     mut pkt := Packet{}
     pkt.l4_hdr = tcp_hdr
     nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+    session.last_send_pkt = pkt
     if session.state == TcpState.close_wait {
         session.state = TcpState.last_ack
     } else if session.state == TcpState.established {
@@ -674,13 +789,16 @@ fn (nd &NetDevice) tcp_close(msg &IpcMsgClose, mut session TcpSession, sock_chan
                     tcp_hdr.seq_num = session.seq_num
                     tcp_hdr.ack_num = session.ack_num
                     tcp_hdr.control_flags = u8(tcp_ack)
+                    pkt.l4_hdr = tcp_hdr
                     nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+                    session.last_send_pkt = pkt
                     session.state = TcpState.closed
                     return
                 }
             }   
             3 * time.second {
                 nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+                session.last_send_pkt = pkt
             }
         }
     }

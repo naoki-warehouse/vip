@@ -48,7 +48,7 @@ struct TcpSocketChans {
 
 fn new_socket_chans() SocketChans {
     return SocketChans {
-        read_chan : chan Packet{cap: 10}
+        read_chan : chan Packet{cap: 1000}
     }
 }
 
