@@ -271,8 +271,10 @@ mut:
     send_data_base_num u32
     last_send_pkt Packet
     retransmit bool
+    retransmit_num int
     read_request_is_pending bool
     read_ops TcpOps
+    ack_is_pending bool
 }
 
 struct TcpRingBuffer {
@@ -352,13 +354,16 @@ fn (r &TcpRingBuffer) get_readable_size() int {
 
 fn (r &TcpRingBuffer) is_partially_lost() bool {
     mut continuous := true
+    mut lost_start_idx := 0
     for i := 0; i < r.data.len; i += 1 {
         read_idx := (r.read_idx_base + i) % r.data.len
         if !r.bitmap[read_idx] && continuous {
             continuous = false
+            lost_start_idx = read_idx
         }
 
         if r.bitmap[read_idx] && !continuous {
+            println("[TCP RING] partially lost (start:${lost_start_idx} end:${read_idx})")
             return true
         }
     }
@@ -391,6 +396,7 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
     mut session := TcpSession{
         state: TcpState.closed
     }
+    mut pkt := Packet{}
     for {
         mut port := u16(0)
         mut ttl := 0
@@ -403,7 +409,7 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
             nonblock = sock.option_fd_nonblock
         }
         select {
-            pkt := <- sock_chan.read_chan {
+            pkt = <- sock_chan.read_chan {
                 recv_ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
                 recv_tcp_hdr := pkt.l4_hdr.get_tcp_hdr() or {continue}
                 if recv_ipv4_hdr.src_addr.to_string() != session.peer_addr.ipv4.to_string() {
@@ -487,23 +493,27 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                         session.state = TcpState.close_wait
                         session.ack_num += 1
                     }
-                    if (recv_tcp_hdr.control_flags & tcp_psh > 0 || nodelay) && (pkt.payload.len > 0) {
-                        mut tcp_hdr := TcpHdr {
-                            src_port : port
-                            dst_port : session.peer_addr.port
-                            seq_num : session.seq_num
-                            ack_num : session.ack_num
-                            data_offset : 20
-                            control_flags : u8(tcp_ack)
-                            window_size: u16(session.recv_ring.get_free_size())
-                        }
-                        mut send_pkt := Packet{}
-                        send_pkt.l4_hdr = tcp_hdr
-                        nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
-                        session.last_send_pkt = send_pkt
-                        session.retransmit = session.recv_ring.is_partially_lost()
-                        continue
+                    mut tcp_hdr := TcpHdr {
+                        src_port : port
+                        dst_port : session.peer_addr.port
+                        seq_num : session.seq_num
+                        ack_num : session.ack_num
+                        data_offset : 20
+                        control_flags : u8(tcp_ack)
+                        window_size: u16(session.recv_ring.get_free_size())
                     }
+                    mut send_pkt := Packet{}
+                    send_pkt.l4_hdr = tcp_hdr
+                    session.last_send_pkt = send_pkt
+                    session.retransmit = session.recv_ring.is_partially_lost()
+                    if ((recv_tcp_hdr.control_flags & tcp_psh > 0 || nodelay) && (pkt.payload.len > 0)) || session.ack_is_pending {
+                        if sock_chan.read_chan.len == 0 {
+                            nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                            session.ack_is_pending = false
+                        } else {
+                            session.ack_is_pending = true
+                        }
+                    } 
                 }
             }
             mut op := <- sock_chan.control_chan {
@@ -583,12 +593,16 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
             }
             100 * time.millisecond {
                 if session.retransmit && session.state != TcpState.closed {
-                    if session.state == TcpState.established {
+                    if session.state == TcpState.established && session.retransmit_num < 10 {
                         println("[TCP $fd] Retransmission")
                         nd.send_ipv4(mut session.last_send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
                         session.retransmit = session.recv_ring.is_partially_lost() || session.send_data.len != 0
                         println("[TCP $fd] IsPartiallyLost:${session.recv_ring.is_partially_lost()}")
                         println("[TCP $fd] send_data.len:${session.send_data.len}")
+                        session.retransmit_num += 1
+                    } else {
+                        session.retransmit = false
+                        session.retransmit_num = 0
                     }
                 }
             }

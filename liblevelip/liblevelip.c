@@ -766,7 +766,6 @@ int select(int nfds, fd_set *restrict readfds,
             }
             if (errorfds != NULL)
                 memcpy(errorfds, kernel_error_fds, sizeof(fd_set));
-
         }
         lvl_dbg("Select infinte loop2");
         if (lvlip_fds_cnt > 0) {
