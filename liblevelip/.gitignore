@@ -1,3 +1,4 @@
 ping-log
 curl-log
 telnet-log
+ssh-log

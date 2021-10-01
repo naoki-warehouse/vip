@@ -609,6 +609,33 @@ fn (nd &NetDevice) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Strea
 
 fn (nd &NetDevice) handle_write(msg &IpcMsgWrite, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Write] ${msg.to_string()}")
+    mut domain := 0
+    mut sock_type := 0
+    mut protocol := 0
+    lock sock {
+        domain = sock.domain
+        sock_type = sock.sock_type
+        protocol = sock.protocol
+    }
+    if sock_type == C.SOCK_STREAM {
+        op := TcpOps {
+            msg: IpcMsg{msg: msg}
+            ipc_sock: ipc_sock
+        }
+        rlock sock {
+            sock.tcp_chans.control_chan <- op
+        }
+        rlock sock {
+            <- sock.tcp_chans.control_chan 
+        }
+        res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : int(msg.len)
+            err : 0
+        }
+        ipc_sock.write(res_msg.to_bytes()) ?
+        return
+    }
 }
 
 fn (nd &NetDevice) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {

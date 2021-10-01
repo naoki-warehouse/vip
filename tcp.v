@@ -271,6 +271,8 @@ mut:
     send_data_base_num u32
     last_send_pkt Packet
     retransmit bool
+    read_request_is_pending bool
+    read_ops TcpOps
 }
 
 struct TcpRingBuffer {
@@ -393,10 +395,12 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
         mut port := u16(0)
         mut ttl := 0
         mut nodelay := false
+        mut nonblock := false
         rlock sock {
             port = sock.port
             ttl = sock.ttl
             nodelay = sock.option_tcp_nodelay
+            nonblock = sock.option_fd_nonblock
         }
         select {
             pkt := <- sock_chan.read_chan {
@@ -462,6 +466,20 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                         session.recv_ring.write(recv_tcp_hdr.seq_num, pkt.payload) or {println("buffer corrupt!")}
                         println("[TCP $fd] Recv data(size:${pkt.payload.len})")
                         println("[TCP $fd] Readable size:${session.recv_ring.get_readable_size()}")
+                    }
+                    if session.read_request_is_pending && session.recv_ring.get_readable_size() > 0 {
+                        msg := session.read_ops.msg.msg
+                        match msg {
+                            IpcMsgRead {
+                                println("HOGEHOGE")
+                                nd.tcp_read(msg, mut session, mut session.read_ops.ipc_sock, shared sock) or {println("[TCP $fd] failed to read")}
+                                println("[TCP $fd] Read success")
+                                sock_chan.control_chan <- session.read_ops
+                                session.read_request_is_pending = false
+                                println("[TCP $fd] Pended read request is done.")
+                            }
+                            else {}
+                        }
                     }
                     session.ack_num = session.recv_ring.get_ack_num()
 
@@ -532,29 +550,32 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                     }
                     IpcMsgSendto {
                         println("[TCP $fd] Sendto")
-                        rlock sock {
-                            if sock.option_fd_nonblock {
-                                sock_chan.control_chan <- op
-                            }
-                        }
                         nd.tcp_sendto(msg, mut session, shared sock) or {println("[TCP $fd] failed to sendto")}
                         println("[TCP $fd] Sendto success")
-                        rlock sock {
-                            if !sock.option_fd_nonblock {
-                                sock_chan.control_chan <- op
-                            }
-                        }
+                        sock_chan.control_chan <- op
                     }
                     IpcMsgRead {
                         println("[TCP $fd] Read")
-                        nd.tcp_read(msg, mut session, mut op.ipc_sock, shared sock) or {println("[TCP $fd] failed to read")}
-                        println("[TCP $fd] Read success")
-                        sock_chan.control_chan <- op
+                        if session.recv_ring.get_readable_size() == 0 && !nonblock {
+                            println("[TCP $fd] No readable data. Read request is pended")
+                            session.read_request_is_pending = true
+                            session.read_ops = op
+                        } else {
+                            nd.tcp_read(msg, mut session, mut op.ipc_sock, shared sock) or {println("[TCP $fd] failed to read")}
+                            println("[TCP $fd] Read success")
+                            sock_chan.control_chan <- op
+                        }
                     }
                     IpcMsgClose {
                         println("[TCP $fd] Close")
                         nd.tcp_close(msg, mut session, &sock_chan, shared sock) or {println("[TCP $fd] failed to close")}
                         println("[TCP $fd] Close success")
+                        sock_chan.control_chan <- op
+                    }
+                    IpcMsgWrite {
+                        println("[TCP $fd] Write")
+                        nd.tcp_write(msg, mut session, shared sock) or {println("[TCP $fd] failed to write")}
+                        println("[TCP $fd] Write success")
                         sock_chan.control_chan <- op
                     }
                     else {}
@@ -731,10 +752,42 @@ fn (nd &NetDevice) tcp_sendto(msg &IpcMsgSendto, mut session &TcpSession, shared
     }
 }
 
+fn (nd &NetDevice) tcp_write(msg &IpcMsgWrite, mut session &TcpSession, shared sock Socket) ? {
+    mut port := u16(0)
+    mut ttl := 0
+    rlock sock {
+        port = sock.port
+        ttl = sock.ttl
+    }
+    for i := 0; i < msg.buf.len; i += session.mss {
+        mut tcp_hdr := TcpHdr {
+            src_port : port
+            dst_port : session.peer_addr.port
+            seq_num : u32(session.send_data_base_num + u32(session.send_data.len))
+            ack_num : session.ack_num
+            data_offset : 20
+            control_flags : u8(tcp_psh|tcp_ack)
+            window_size: 4000
+        }
+        mut send_pkt := Packet{}
+        send_pkt.l4_hdr = tcp_hdr
+        mut data_size := session.mss
+        if i + data_size > msg.buf.len {
+            data_size = msg.buf.len - i
+        }
+        send_pkt.payload = msg.buf[i..i+data_size]
+        session.send_data << msg.buf[i..i+data_size]
+        nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl)?
+        session.last_send_pkt = send_pkt
+        session.retransmit = true
+    }
+}
+
 fn (nd &NetDevice) tcp_read(msg &IpcMsgRead, mut session TcpSession, mut ipc_sock unix.StreamConn, shared sock Socket) ? {
     mut res := *msg
 
     res.buf = session.recv_ring.read(int(msg.len))
+    res.len = u64(res.buf.len)
     res_msg := IpcMsgError {
         IpcMsgBase : msg.IpcMsgBase
         rc : res.buf.len

@@ -282,7 +282,14 @@ ssize_t read(int sockfd, void *buf, size_t len)
 
     if (sock == NULL) {
         /* No lvl-ip IPC socket associated */
-        return _read(sockfd, buf, len);
+        int res = -1;
+        while (res < 0) {
+            res = _read(sockfd, buf, len);
+            //print_err("READ fd:%d res:%d\n", sockfd, res);
+            //perror("_read");
+	    usleep(50);
+        }
+        return res;
     }
 
     lvl_sock_dbg("Read called", sock);
@@ -337,9 +344,9 @@ ssize_t read(int sockfd, void *buf, size_t len)
     }
 
     memset(buf, 0, len);
-    memcpy(buf, data->buf, data->len);
+    memcpy(buf, data->buf, error->rc);
         
-    return data->len;
+    return error->rc;
 }
 
 ssize_t send(int fd, const void *buf, size_t len, int flags)
@@ -378,7 +385,8 @@ ssize_t sendto(int fd, const void *buf, size_t len,
     memcpy(msg->data, &payload, sizeof(struct ipc_sendto));
     memcpy(((struct ipc_sendto *)msg->data)->buf, buf, len);
 
-    return transmit_lvlip(sock->lvlfd, msg, msglen);
+    int rc = transmit_lvlip(sock->lvlfd, msg, msglen);
+    return rc;
 }
 
 ssize_t recv(int fd, void *buf, size_t len, int flags)
@@ -744,7 +752,7 @@ int select(int nfds, fd_set *restrict readfds,
         if (kernel_fds_cnt > 0) {
             struct timeval timeout_sec;
             timeout_sec.tv_sec = 0;
-            timeout_sec.tv_usec = 500*1000;
+            timeout_sec.tv_usec = 100*1000;
             kernel_res = _select(kernel_fd_max+1, kernel_read_fds, kernel_write_fds, kernel_error_fds, &timeout_sec);
             if (kernel_res < 0) {
                 perror("select kernel");
@@ -753,10 +761,12 @@ int select(int nfds, fd_set *restrict readfds,
         if (kernel_res > 0) {
             if (readfds != NULL)
                 memcpy(readfds, kernel_read_fds, sizeof(fd_set));
-            if (writefds != NULL)
+            if (writefds != NULL) {
                 memcpy(writefds, kernel_write_fds, sizeof(fd_set));
+            }
             if (errorfds != NULL)
                 memcpy(errorfds, kernel_error_fds, sizeof(fd_set));
+
         }
         lvl_dbg("Select infinte loop2");
         if (lvlip_fds_cnt > 0) {
