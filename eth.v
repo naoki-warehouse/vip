@@ -10,6 +10,7 @@ mut:
 enum EtherType {
     arp = 0x0806
     ipv4 = 0x0800
+    ipv6 = 0x86DD
 }
 
 fn (e EthHdr) to_string() string {

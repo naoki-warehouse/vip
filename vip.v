@@ -17,6 +17,7 @@ mut:
     tap_recv_chan chan Packet
     my_mac PhysicalAddress
     my_ip IPv4Address
+    my_ipv6 IPv6Address
     my_dgw IPv4Address
     arp_table_chans ArpTableChans
     threads []thread = []thread{}
@@ -142,6 +143,26 @@ fn init_netdevice() ?NetDevice {
     netdev.my_dgw.addr[2] = 10
     netdev.my_dgw.addr[3] = 1
 
+    netdev.my_ipv6 = IPv6Address {
+        subnet_length : 64
+    }
+    netdev.my_ipv6.addr[0] = 0x20
+    netdev.my_ipv6.addr[1] = 0x01
+    netdev.my_ipv6.addr[2] = 0x0d
+    netdev.my_ipv6.addr[3] = 0xb8
+    netdev.my_ipv6.addr[4] = 0x00
+    netdev.my_ipv6.addr[5] = 0x00
+    netdev.my_ipv6.addr[6] = 0x00
+    netdev.my_ipv6.addr[7] = 0x00
+    netdev.my_ipv6.addr[8] = 0x00
+    netdev.my_ipv6.addr[9] = 0x00
+    netdev.my_ipv6.addr[10] = 0x00
+    netdev.my_ipv6.addr[11] = 0x00
+    netdev.my_ipv6.addr[12] = 0xff
+    netdev.my_ipv6.addr[13] = 0xff
+    netdev.my_ipv6.addr[14] = 0
+    netdev.my_ipv6.addr[15] = 1
+
     assert netdev.my_ip.contains(netdev.my_dgw)
 
     netdev.tap_name = "test_tap"
@@ -158,11 +179,19 @@ fn (nd NetDevice) print() {
     println("- TAP Device Name: ${nd.tap_name}")
     println("- My MAC Address : ${nd.my_mac.to_string()}")
     println("- My IP Address  : ${nd.my_ip.to_string()}")
+    println("- My IPv6 Address  : ${nd.my_ipv6.to_string()}")
 }
 
 
 fn (mut nd NetDevice) handle_frame(pkt &Packet) ? {
     println("[ETH] $pkt.l2_hdr.to_string()")
+    l2_hdr := pkt.l2_hdr
+    if l2_hdr.dmac != nd.my_mac &&
+       l2_hdr.dmac != physical_address_bcast() &&
+       l2_hdr.dmac != nd.my_ipv6.get_ns_mac_addr() {
+           return
+    }
+
     l3_hdr := pkt.l3_hdr
     match l3_hdr {
         ArpHdr {
@@ -170,6 +199,9 @@ fn (mut nd NetDevice) handle_frame(pkt &Packet) ? {
         }
         IPv4Hdr {
             nd.handle_ipv4(pkt, &l3_hdr) ?
+        }
+        IPv6Hdr {
+            nd.handle_ipv6(pkt, &l3_hdr) ?
         }
         HdrNone {}
     }
@@ -183,13 +215,13 @@ fn (mut nd NetDevice) handle_arp(pkt &Packet, arp_hdr &ArpHdr) {
     }
     nd.arp_table_chans.insert_chan <- arp_col
 
-    if arp_hdr.tpa.to_string() != nd.my_ip.to_string() {
+    if arp_hdr.tpa != nd.my_ip {
         return
     }
 
     res := nd.get_arp_col(arp_hdr.spa)
-    assert arp_col.ip.to_string() == res.ip.to_string()
-    assert arp_col.mac.to_string() == res.mac.to_string()
+    assert arp_col.ip == res.ip
+    assert arp_col.mac == res.mac
 
     if arp_hdr.op == u16(ArpOpcode.request) {
         mut send_pkt := Packet {
@@ -222,7 +254,7 @@ fn (nd NetDevice) get_arp_col(ip IPv4Address) ArpTableCol {
 fn (mut nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
     println("[IPv4] ${ipv4_hdr.to_string()}")
 
-    if ipv4_hdr.dst_addr.to_string() != nd.my_ip.to_string() {
+    if ipv4_hdr.dst_addr != nd.my_ip {
         return
     }
 
@@ -279,8 +311,22 @@ fn (mut nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
                 nd.handle_tcp(l4_pkt, &l4_hdr)
             }
         }
+        Icmpv6Hdr {
+
+        }
         HdrNone {
         }
+    }
+}
+
+fn (mut nd NetDevice) handle_ipv6(pkt &Packet, ipv6_hdr &IPv6Hdr) ? {
+    println("[IPv6] ${ipv6_hdr.to_string()}")
+    l4_hdr := pkt.l4_hdr
+    match l4_hdr {
+        Icmpv6Hdr {
+            nd.handle_icmpv6(pkt, l4_hdr)
+        }
+        else {}
     }
 }
 
@@ -318,6 +364,81 @@ fn (nd NetDevice) handle_icmp_echo(pkt &Packet, icmp_hdr_echo &IcmpHdrEcho) {
         }
         nd.send_ipv4(mut send_pkt, addr_info, ipv4_hdr.ttl-1) or { println("failed to send icmp reply")}
     }
+}
+
+fn (nd NetDevice) handle_icmpv6(pkt &Packet, icmpv6_hdr &Icmpv6Hdr) {
+    println("[ICMPv6] ${icmpv6_hdr.to_string()}")
+    hdr := icmpv6_hdr.hdr
+    match hdr {
+        Icmpv6HdrBase {
+        }
+        Icmpv6HdrNeighborSolicitation {
+            nd.handle_icmpv6_ns(pkt, &hdr)
+        }
+        Icmpv6HdrEcho {
+            nd.handle_icmpv6_echo(pkt, &hdr)
+        }
+        else {}
+    }
+}
+
+fn (nd NetDevice) handle_icmpv6_ns(pkt &Packet, icmpv6_hdr &Icmpv6HdrNeighborSolicitation) {
+    if icmpv6_hdr.target_address != nd.my_ipv6 {
+        return
+    }
+    icmp_na := Icmpv6HdrNeighborAdvertisement {
+        Icmpv6HdrBase : Icmpv6HdrBase {
+            icmpv6_type: byte(Icmpv6Type.neighbor_advertisement)
+            code: byte(0)
+            chksum: u16(0)
+        }
+        target_address : nd.my_ipv6
+        flag_router: false
+        flag_solicited: true
+        flag_override: true
+        option: Icmpv6OptionLinkLayerAddress {
+            option_type: byte(Icmpv6Option.target_linklayer_address)
+            length: 8
+            link_addr: nd.my_mac
+        }
+    }
+    println("[ICMPv6 NS] Recv")
+    mut send_pkt := Packet{}
+    send_pkt.l4_hdr = Icmpv6Hdr{ hdr: icmp_na }
+    ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
+    dst_addr := AddrInfo {
+        mac: pkt.l2_hdr.smac,
+        ipv6: ipv6_hdr.src_addr
+    }
+
+    nd.send_ipv6(mut send_pkt, &dst_addr, ipv6_hdr.hop_limit) or { return }
+    println("[ICMPv6 NS] Send NA")
+}
+
+fn (nd NetDevice) handle_icmpv6_echo(pkt &Packet, icmpv6_hdr &Icmpv6HdrEcho) {
+    println("[ICMPv6 Echo] ${icmpv6_hdr.to_string()}")
+
+    icmp_reply := Icmpv6HdrEcho {
+        Icmpv6HdrBase : Icmpv6HdrBase {
+            icmpv6_type: byte(Icmpv6Type.echo_reply)
+            code: byte(0)
+            chksum: u16(0)
+        }
+        id: icmpv6_hdr.id
+        seq_num: icmpv6_hdr.seq_num
+    }
+
+    mut send_pkt := Packet{}
+    send_pkt.payload = pkt.payload
+    send_pkt.l4_hdr = Icmpv6Hdr{ hdr: icmp_reply }
+    ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
+    dst_addr := AddrInfo {
+        mac: pkt.l2_hdr.smac,
+        ipv6: ipv6_hdr.src_addr
+    }
+
+    nd.send_ipv6(mut send_pkt, &dst_addr, ipv6_hdr.hop_limit-1) or { return }
+    println("[ICMPv6 Echo] Send Reply")
 }
 
 fn (nd NetDevice) handle_tcp(pkt &Packet, tcp_hdr &TcpHdr) {
@@ -419,6 +540,9 @@ fn (nd NetDevice) send_ipv4(mut pkt &Packet, addr &AddrInfo, ttl int) ? {
             pseudo_bytes << pkt.payload
             l4_hdr.chksum = calc_chksum(pseudo_bytes)
         }
+        Icmpv6Hdr {
+
+        }
         HdrNone {
 
         }
@@ -490,6 +614,9 @@ fn (nd NetDevice) send_ipv4_fragmented(mut pkt &Packet, dst_addr &AddrInfo) ? {
         TcpHdr {
             payload = l4_hdr.to_bytes()
         }
+        Icmpv6Hdr {
+
+        }
         HdrNone {}
     } 
     pkt.l4_hdr = HdrNone{}
@@ -518,6 +645,40 @@ fn (nd NetDevice) send_ipv4_fragmented(mut pkt &Packet, dst_addr &AddrInfo) ? {
 
 }
 
+fn (nd NetDevice) send_ipv6(mut pkt &Packet, dst_addr &AddrInfo, hop_limit byte) ? {
+    mut ipv6_hdr := IPv6Hdr {}
+    mut l4_hdr := &pkt.l4_hdr
+    match mut l4_hdr {
+        Icmpv6Hdr {
+            mut icmp_bytes := l4_hdr.to_bytes()
+            icmp_bytes << pkt.payload
+            pseudo_hdr := PseudoHdrv6 {
+                src_addr : nd.my_ipv6
+                dst_addr : dst_addr.ipv6
+                length : u32(icmp_bytes.len)
+                next_header: byte(IPv6Protocol.icmpv6)
+            }
+            mut pseudo_bytes := pseudo_hdr.to_bytes()
+            pseudo_bytes << icmp_bytes
+            l4_hdr.set_checksum(calc_chksum(pseudo_bytes))
+
+            ipv6_hdr.payload_length = u16(icmp_bytes.len)
+            ipv6_hdr.next_header = byte(IPv6Protocol.icmpv6)
+        }
+        else {
+        }
+    }
+
+    ipv6_hdr.traffic_class = 0
+    ipv6_hdr.flow_label = 0
+    ipv6_hdr.hop_limit = hop_limit
+    ipv6_hdr.src_addr = nd.my_ipv6
+    ipv6_hdr.dst_addr = dst_addr.ipv6
+    pkt.l3_hdr = ipv6_hdr
+
+    nd.send_eth(mut pkt, dst_addr) ?
+}
+
 fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
     mut eth_hdr := EthHdr{
         smac: nd.my_mac
@@ -536,6 +697,10 @@ fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
         IPv4Hdr {
             eth_hdr.dmac = dst_addr.mac
             eth_hdr.ether_type = u16(EtherType.ipv4)
+        }
+        IPv6Hdr {
+            eth_hdr.dmac = dst_addr.mac
+            eth_hdr.ether_type = u16(EtherType.ipv6)
         }
         HdrNone {
         }
@@ -575,6 +740,9 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
         IPv4Hdr {
             l3_bytes = l3_hdr.to_bytes()
         }
+        IPv6Hdr {
+            l3_bytes = l3_hdr.to_bytes()
+        }
         HdrNone {
 
         }
@@ -594,6 +762,9 @@ fn (nd NetDevice) send_frame(mut pkt Packet) {
             l4_bytes = l4_hdr.to_bytes()
         }
         TcpHdr {
+            l4_bytes = l4_hdr.to_bytes()
+        }
+        Icmpv6Hdr {
             l4_bytes = l4_hdr.to_bytes()
         }
         HdrNone {

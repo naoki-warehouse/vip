@@ -8,8 +8,8 @@ fn (hn HdrNone) len() int {
     return 0
 }
 
-type L3Hdr = HdrNone | ArpHdr | IPv4Hdr
-type L4Hdr = HdrNone | IcmpHdr | UdpHdr | TcpHdr
+type L3Hdr = HdrNone | ArpHdr | IPv4Hdr | IPv6Hdr
+type L4Hdr = HdrNone | IcmpHdr | UdpHdr | TcpHdr | Icmpv6Hdr
 
 struct Packet {
 mut:
@@ -41,6 +41,23 @@ fn (ph PseudoHdr) to_bytes() []byte {
     return buf
 }
 
+struct PseudoHdrv6 {
+    src_addr IPv6Address
+    dst_addr IPv6Address
+    length u32
+    next_header byte
+}
+
+fn (ph PseudoHdrv6) to_bytes() []byte {
+    mut buf := []byte{len: 40}
+    copy(buf[0..16], ph.src_addr.addr[0..])
+    copy(buf[16..32], ph.dst_addr.addr[0..])
+    copy(buf[32..36], be_u32_to_bytes(ph.length))
+    buf[39] = ph.next_header
+
+    return buf
+}
+
 fn parse_eth_frame(mut pkt Packet, buf[]byte) ? {
     eth_hdr := parse_eth_hdr(buf) ?
     pkt.l2_hdr = eth_hdr
@@ -48,6 +65,8 @@ fn parse_eth_frame(mut pkt Packet, buf[]byte) ? {
         return parse_arp_packet(mut pkt, buf[14..])
     } else if eth_hdr.ether_type == u16(EtherType.ipv4) {
         return parse_ipv4_packet(mut pkt, buf[14..])
+    } else if eth_hdr.ether_type == u16(EtherType.ipv6) {
+        return parse_ipv6_packet(mut pkt, buf[14..])
     }
 
     return error("unknown EtherType:0x${eth_hdr.ether_type:04X}")
@@ -80,10 +99,30 @@ fn parse_ipv4_packet(mut pkt Packet, buf []byte) ? {
     return error("unknown protocol:${ipv4_hdr.protocol}")
 }
 
+fn parse_ipv6_packet(mut pkt Packet, buf []byte) ? {
+    ipv6_hdr := parse_ipv6_hdr(buf) ?
+    pkt.l3_hdr = ipv6_hdr
+
+    if ipv6_hdr.protocol == IPv6Protocol.icmpv6 {
+        return parse_icmpv6_packet(mut pkt, buf[ipv6_hdr.hdr_len..])
+    }
+}
+
 fn parse_icmp_packet(mut pkt Packet, buf []byte) ? {
     icmp_hdr := parse_icmp_hdr(buf) ?
     pkt.l4_hdr = icmp_hdr
     pkt.payload = buf[icmp_hdr.len()..]
+}
+
+fn parse_icmpv6_packet(mut pkt Packet, buf []byte) ? {
+    icmpv6_hdr := parse_icmpv6_hdr(buf) ?
+    pkt.l4_hdr = icmpv6_hdr
+    match icmpv6_hdr.hdr {
+        Icmpv6HdrEcho {
+            pkt.payload = buf[8..]
+        }
+        else {}
+    }
 }
 
 fn parse_tcp_packet(mut pkt Packet, buf []byte) ? {
@@ -98,6 +137,9 @@ fn (l3_hdr &L3Hdr) to_string() string {
             return l3_hdr.to_string()
         }
         ArpHdr {
+            return l3_hdr.to_string()
+        }
+        IPv6Hdr {
             return l3_hdr.to_string()
         }
         HdrNone {
@@ -115,6 +157,9 @@ fn (l4_hdr &L4Hdr) to_string() string {
             return ""
         }
         TcpHdr {
+            return l4_hdr.to_string()
+        }
+        Icmpv6Hdr {
             return l4_hdr.to_string()
         }
         HdrNone {
@@ -163,6 +208,17 @@ fn (l4_hdr &L4Hdr) get_tcp_hdr() ?TcpHdr {
         }
         else {
             return error("not tcp header")
+        }
+    }
+}
+
+fn (l3_hdr &L3Hdr) get_ipv6_hdr() ?IPv6Hdr {
+    match l3_hdr {
+        IPv6Hdr {
+            return l3_hdr
+        }
+        else {
+            return error("not ipv6 header")
         }
     }
 }

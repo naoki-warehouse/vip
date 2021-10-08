@@ -25,6 +25,16 @@ fn (pa PhysicalAddress) to_string() string {
     return s[1..]
 }
 
+fn (pa PhysicalAddress) == (pb PhysicalAddress) bool {
+    for i := 0; i < 6; i++ {
+        if pa.addr[i] != pb.addr[i] {
+            return false
+        }
+    }
+
+    return true
+}
+
 fn physical_address_bcast() PhysicalAddress {
     mut phy_addr := PhysicalAddress{}
     for i := 0; i < 6; i += 1 {
@@ -60,6 +70,16 @@ fn (ia IPv4Address) to_string() string {
     return s[1..]
 }
 
+fn (ia IPv4Address) == (ib IPv4Address) bool {
+    for i := 0; i < 4; i += 1 {
+        if ia.addr[i] != ib.addr[i] {
+            return false
+        }
+    }
+
+    return true
+}
+
 fn (ia &IPv4Address) contains(addr &IPv4Address) bool {
     mut network_mask := u32(0)
     for i := 0; i < 32; i += 1 {
@@ -73,10 +93,75 @@ fn (ia &IPv4Address) contains(addr &IPv4Address) bool {
     return (ip_a ^ ip_b) & network_mask == 0
 }
 
+struct IPv6Address {
+    subnet_length int
+mut:
+    addr [16]byte
+}
+
+fn parse_ipv6_address(buf []byte) IPv6Address {
+    assert buf.len >= 16
+    mut ipv6_addr := IPv6Address{}
+
+    for i := 0; i < 16; i += 1 {
+        ipv6_addr.addr[i] = buf[i]
+    }
+
+    return ipv6_addr
+}
+
+fn (ia &IPv6Address) to_string() string {
+    mut s := ""
+    for i := 0; i < 16; i += 1 {
+        if i != 0 && i % 2 == 0 {
+            s += ":"
+        }
+        s += "${ia.addr[i]:02x}"
+    }
+
+    return s
+}
+
+fn (ia IPv6Address) == (ib IPv6Address) bool {
+    for i := 0; i < 16; i += 1 {
+        if ia.addr[i] != ib.addr[i] {
+            return false
+        }
+    }
+
+    return true
+}
+
+fn (ia &IPv6Address) get_ns_mac_addr() PhysicalAddress {
+    mut addr := PhysicalAddress{}
+    addr.addr[0] = 0x33
+    addr.addr[1] = 0x33
+    addr.addr[2] = 0xFF
+    addr.addr[3] = ia.addr[13]
+    addr.addr[4] = ia.addr[14]
+    addr.addr[5] = ia.addr[15]
+
+    return addr
+}
+
+fn (ia &IPv6Address) get_ns_multicast_addr() IPv6Address {
+    mut addr := IPv6Address{}
+    addr.addr[0] = 0xFF
+    addr.addr[1] = 0x02
+    addr.addr[11] = 0x01
+    addr.addr[12] = 0xFF
+    addr.addr[13] = ia.addr[13]
+    addr.addr[14] = ia.addr[14]
+    addr.addr[15] = ia.addr[15]
+
+    return addr
+}
+
 struct AddrInfo {
 mut:
     mac PhysicalAddress
     ipv4 IPv4Address
+    ipv6 IPv6Address
     port u16
 }
 

@@ -761,15 +761,18 @@ int select(int nfds, fd_set *restrict readfds,
         if (kernel_res > 0) {
             if (readfds != NULL)
                 memcpy(readfds, kernel_read_fds, sizeof(fd_set));
-            if (writefds != NULL) {
+            if (writefds != NULL) 
                 memcpy(writefds, kernel_write_fds, sizeof(fd_set));
-            }
             if (errorfds != NULL)
                 memcpy(errorfds, kernel_error_fds, sizeof(fd_set));
         }
         lvl_dbg("Select infinte loop2");
         if (lvlip_fds_cnt > 0) {
-            poll(lvlip_fds, lvlip_fds_cnt, 100);
+            if (kernel_res > 0) {
+                poll(lvlip_fds, lvlip_fds_cnt, 0);
+            } else {
+                poll(lvlip_fds, lvlip_fds_cnt, 0);
+            }
             for (int i=0; i < lvlip_fds_cnt; i++){
                 struct pollfd lvlip_fd = lvlip_fds[i];
                 if (lvlip_fd.revents & POLLIN) {
