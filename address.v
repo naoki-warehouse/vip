@@ -157,6 +157,10 @@ fn (ia &IPv6Address) get_ns_multicast_addr() IPv6Address {
     return addr
 }
 
+fn (ia &IPv6Address) is_link_local_address() bool {
+    return ia.addr[0] == 0xFE && ia.addr[1] == 0x80
+}
+
 struct AddrInfo {
 mut:
     mac PhysicalAddress

@@ -1,5 +1,7 @@
 module main
 
+import time
+
 struct IPv6Hdr {
     version byte = 6
 mut:
@@ -68,4 +70,72 @@ fn (ip6 &IPv6Hdr) to_string() string {
     s += "SrcAddr:${ip6.src_addr.to_string()} "
     s += "DstAddr:${ip6.dst_addr.to_string()}"
     return s
+}
+
+struct NeighborTable {
+    my_mac PhysicalAddress
+    my_ipv6 IPv6Address
+mut:
+    table map[string]NeighborTableCol
+}
+
+struct NeighborTableCol {
+mut:
+    mac PhysicalAddress
+    ip6 IPv6Address
+    ttl time.Time
+}
+
+fn (ntc &NeighborTableCol) to_string() string {
+    ttl_sec := ntc.ttl.unix_time() - time.now().unix_time()
+    return "MACAddresss:${ntc.mac.to_string()} IPv6Address:${ntc.ip6.to_string()} " +
+           "TTL: ${ttl_sec}sec"
+}
+
+struct NeighborTableChans {
+    insert_chan chan NeighborTableCol
+    get_chan chan NeighborTableCol
+}
+
+fn new_neighbor_table_chans() NeighborTableChans {
+    return NeighborTableChans {
+        insert_chan : chan NeighborTableCol{}
+        get_chan : chan NeighborTableCol{}
+    }
+}
+
+fn new_neighbor_table() &NeighborTable {
+    return &NeighborTable {
+        table: map[string]NeighborTableCol{}
+    }
+}
+
+fn (mut nt NeighborTable) insert(col NeighborTableCol) {
+    nt.table[col.ip6.to_string()] = col
+    nt.table[col.ip6.to_string()].ttl = time.now().add_seconds(30)
+}
+
+fn (mut nt NeighborTable) get(ip6 IPv6Address) ?NeighborTableCol {
+    return nt.table[ip6.to_string()]
+}
+
+fn (chans NeighborTableChans) neighbor_table_thread(my_mac &PhysicalAddress, my_ipv6 &IPv6Address) {
+    mut neighbor_table := NeighborTable {
+        my_mac: *my_mac
+        my_ipv6: *my_ipv6
+    }
+
+    for true {
+        select {
+            col := <- chans.insert_chan {
+                neighbor_table.insert(col)
+                println("[Neighbor Table] Inserted ${col.to_string()}")
+            }
+            col := <- chans.get_chan {
+                res := neighbor_table.get(col.ip6) or { NeighborTableCol{} }
+                println("[Neighbor Table] Get ${res.to_string()}")
+                chans.get_chan <- res
+            }
+        }
+    }
 }

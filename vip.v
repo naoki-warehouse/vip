@@ -25,6 +25,8 @@ mut:
     fragmented_packets IPv4FragmentPackets = IPv4FragmentPackets{}
     ipc_sock_chan chan IpcSocket
     lo_chan chan Packet
+    icmpv6_handle_chans Icmpv6HandleChans
+    neighbor_table_chans NeighborTableChans
 }
 
 struct IPv4FragmentPackets {
@@ -171,6 +173,9 @@ fn init_netdevice() ?NetDevice {
     netdev.tap_recv_chan = chan Packet{cap: 10}
     netdev.arp_table_chans = new_arp_table_chans()
     netdev.lo_chan = chan Packet{cap: 10}
+    netdev.icmpv6_handle_chans = new_icmpv6_handle_chans()
+    netdev.neighbor_table_chans = new_neighbor_table_chans()
+
     return netdev
 }
 
@@ -319,8 +324,25 @@ fn (mut nd NetDevice) handle_ipv4(pkt &Packet, ipv4_hdr &IPv4Hdr) ? {
     }
 }
 
+fn (nd &NetDevice) get_nt_col(ip IPv6Address) NeighborTableCol {
+    nt_col := NeighborTableCol{
+        ip6: ip
+    }
+    nd.neighbor_table_chans.get_chan <- nt_col
+    res := <- nd.neighbor_table_chans.get_chan
+
+    return res
+}
+
 fn (mut nd NetDevice) handle_ipv6(pkt &Packet, ipv6_hdr &IPv6Hdr) ? {
     println("[IPv6] ${ipv6_hdr.to_string()}")
+    if ipv6_hdr.src_addr.is_link_local_address() {
+        nt_col := NeighborTableCol {
+            mac: pkt.l2_hdr.smac
+            ip6: ipv6_hdr.src_addr
+        }
+        nd.neighbor_table_chans.insert_chan <- nt_col
+    }
     l4_hdr := pkt.l4_hdr
     match l4_hdr {
         Icmpv6Hdr {
@@ -370,15 +392,19 @@ fn (nd NetDevice) handle_icmpv6(pkt &Packet, icmpv6_hdr &Icmpv6Hdr) {
     println("[ICMPv6] ${icmpv6_hdr.to_string()}")
     hdr := icmpv6_hdr.hdr
     match hdr {
-        Icmpv6HdrBase {
+        Icmpv6HdrNeighborAdvertisement {
+            if hdr.option.option_type == byte(Icmpv6Option.target_linklayer_address) {
+                println("[ICMPv6 NA] Recv advertisement")
+                ns_col := NeighborTableCol {
+                    mac : hdr.option.link_addr
+                    ip6: hdr.target_address
+                }
+                nd.neighbor_table_chans.insert_chan <- ns_col
+            }
         }
-        Icmpv6HdrNeighborSolicitation {
-            nd.handle_icmpv6_ns(pkt, &hdr)
+        else {
+            nd.icmpv6_handle_chans.recv_chan <- *pkt
         }
-        Icmpv6HdrEcho {
-            nd.handle_icmpv6_echo(pkt, &hdr)
-        }
-        else {}
     }
 }
 
@@ -402,10 +428,15 @@ fn (nd NetDevice) handle_icmpv6_ns(pkt &Packet, icmpv6_hdr &Icmpv6HdrNeighborSol
             link_addr: nd.my_mac
         }
     }
+    ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
+    nt_col := NeighborTableCol {
+        mac : pkt.l2_hdr.smac
+        ip6 : ipv6_hdr.src_addr
+    }
+    nd.neighbor_table_chans.insert_chan <- nt_col
     println("[ICMPv6 NS] Recv")
     mut send_pkt := Packet{}
     send_pkt.l4_hdr = Icmpv6Hdr{ hdr: icmp_na }
-    ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
     dst_addr := AddrInfo {
         mac: pkt.l2_hdr.smac,
         ipv6: ipv6_hdr.src_addr
@@ -433,7 +464,6 @@ fn (nd NetDevice) handle_icmpv6_echo(pkt &Packet, icmpv6_hdr &Icmpv6HdrEcho) {
     send_pkt.l4_hdr = Icmpv6Hdr{ hdr: icmp_reply }
     ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
     dst_addr := AddrInfo {
-        mac: pkt.l2_hdr.smac,
         ipv6: ipv6_hdr.src_addr
     }
 
@@ -669,6 +699,45 @@ fn (nd NetDevice) send_ipv6(mut pkt &Packet, dst_addr &AddrInfo, hop_limit byte)
         }
     }
 
+    mut dst_addr_rev := *dst_addr
+    if dst_addr_rev.mac.to_string() == "00:00:00:00:00:00" {
+        mut resolve_addr := dst_addr.ipv6
+        mut dmac_rev := nd.get_nt_col(resolve_addr)
+        mut resolve_try_num := 0
+        for dmac_rev.ip6.to_string() != resolve_addr.to_string()  && resolve_try_num < 10 {
+            println("Resolving Address...")
+            icmpv6_ns := Icmpv6HdrNeighborSolicitation {
+                Icmpv6HdrBase : Icmpv6HdrBase {
+                    icmpv6_type : byte(Icmpv6Type.neighbor_solicitation)
+                    code: 0
+                    chksum: 0
+                }
+                target_address : resolve_addr
+                option: Icmpv6OptionLinkLayerAddress {
+                    option_type : byte(Icmpv6Option.source_linklayer_address)
+                    length : 8
+                    link_addr : nd.my_mac
+                }
+            }
+            mut ns_pkt := Packet {
+                l4_hdr : Icmpv6Hdr { hdr: icmpv6_ns}
+                payload: []byte{}
+            }
+            resolve_dst_addr := AddrInfo {
+                mac: resolve_addr.get_ns_mac_addr()
+                ipv6: resolve_addr.get_ns_multicast_addr()
+            }
+            nd.send_ipv6(mut ns_pkt, &resolve_dst_addr, 255) ?
+            time.sleep(1 * time.second)
+            dmac_rev = nd.get_nt_col(resolve_addr)
+            resolve_try_num += 1
+        }
+        if resolve_try_num == 10 {
+            return error("failed to resolve ${resolve_addr.to_string()}")
+        }
+        dst_addr_rev.mac = dmac_rev.mac
+    }
+
     ipv6_hdr.traffic_class = 0
     ipv6_hdr.flow_label = 0
     ipv6_hdr.hop_limit = hop_limit
@@ -676,7 +745,7 @@ fn (nd NetDevice) send_ipv6(mut pkt &Packet, dst_addr &AddrInfo, hop_limit byte)
     ipv6_hdr.dst_addr = dst_addr.ipv6
     pkt.l3_hdr = ipv6_hdr
 
-    nd.send_eth(mut pkt, dst_addr) ?
+    nd.send_eth(mut pkt, dst_addr_rev) ?
 }
 
 fn (nd NetDevice) send_eth(mut pkt &Packet, dst_addr &AddrInfo) ? {
@@ -809,6 +878,8 @@ fn main() {
     }
 
     netdev.threads << go netdev.arp_table_chans.arp_table_thread(&netdev.my_mac, &netdev.my_ip)
+    netdev.threads << go netdev.icmpv6_handle_thread(netdev.icmpv6_handle_chans)
+    netdev.threads << go netdev.neighbor_table_chans.neighbor_table_thread(&netdev.my_mac, &netdev.my_ipv6)
     netdev.threads << go netdev.handle_control_usock("/tmp/vip.sock")
     netdev.threads << go recv_tap(&netdev)
 

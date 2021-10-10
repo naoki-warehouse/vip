@@ -222,3 +222,15 @@ fn (l3_hdr &L3Hdr) get_ipv6_hdr() ?IPv6Hdr {
         }
     }
 }
+
+fn (l4_hdr &L4Hdr) get_icmpv6_hdr() ?Icmpv6Hdr {
+    match l4_hdr {
+        Icmpv6Hdr {
+            return l4_hdr
+        }
+        else {
+            return error("not ipv6 header")
+        }
+    }
+}
+
