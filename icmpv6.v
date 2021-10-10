@@ -290,7 +290,9 @@ fn (nd NetDevice) icmpv6_handle_thread(chans Icmpv6HandleChans) {
                         nd.handle_icmpv6_ns(pkt, &hdr)
                     }
                     Icmpv6HdrEcho {
-                        nd.handle_icmpv6_echo(pkt, &hdr)
+                        if hdr.icmpv6_type == byte(Icmpv6Type.echo_request) {
+                            nd.handle_icmpv6_echo(pkt, &hdr)
+                        }
                     }
                     else {}
                 }

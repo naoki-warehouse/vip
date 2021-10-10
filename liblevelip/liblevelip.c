@@ -61,11 +61,11 @@ static inline struct lvlip_sock *lvlip_get_sock(int fd) {
 static int is_socket_supported(int domain, int type, int protocol)
 {
     lvl_dbg("domain:%d type:%d protocol:%d\n", domain, type, protocol);
-    if (domain != AF_INET) return 0;
+    if (domain != AF_INET && domain != AF_INET6) return 0;
 
     if (type != SOCK_DGRAM && type != SOCK_STREAM) return 0;
 
-    if (protocol != IPPROTO_IP && protocol != IPPROTO_ICMP && protocol != IPPROTO_TCP) return 0;
+    if (protocol != IPPROTO_IP && protocol != IPPROTO_ICMP && protocol != IPPROTO_TCP && protocol != IPPROTO_ICMPV6) return 0;
     
     lvl_dbg("domain:%d type:%d protocol:%d is supported\n", domain, type, protocol);
     return 1;
@@ -239,9 +239,10 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 
     struct ipc_connect payload = {
         .sockfd = sockfd,
-        .addr = *addr,
         .addrlen = addrlen
     };
+
+    memcpy(payload.addr, addr, addrlen);
 
     memcpy(msg->data, &payload, sizeof(struct ipc_connect));
 
@@ -379,7 +380,7 @@ ssize_t sendto(int fd, const void *buf, size_t len,
         .len = len
     };
     if (dest_addr != NULL) {
-        payload.addr = *dest_addr;
+        memcpy(payload.addr, dest_addr, dest_len);
     }
 
     memcpy(msg->data, &payload, sizeof(struct ipc_sendto));
@@ -500,6 +501,12 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
         memcpy(msg->msg_iov[i].iov_base, offset, msg->msg_iov[i].iov_len);
         offset += msg->msg_iov[i].iov_len;
     }
+    if (error->rc > 10) {
+        for (int i = 0 ; i < 10; i++)  {
+            lvl_dbg("0x%02X ", ((uint8_t *)msg->msg_iov[0].iov_base)[i]);
+        }
+    }
+    lvl_dbg("sockfd:%d recv_size:%d", data->sockfd, error->rc);
 
     return error->rc;
 }

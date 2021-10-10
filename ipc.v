@@ -28,6 +28,8 @@ mut:
     option_socket_keepalive bool
     option_socket_oobinline bool
     option_ip_tos int
+    option_ipv6_recverr bool
+    option_ipv6_recvhoplimit bool
     option_tcp_nodelay bool
     option_tcp_keepidle int
     option_tcp_keepintvl int
@@ -257,19 +259,30 @@ fn (nd &NetDevice) handle_connect(msg &IpcMsgConnect, mut ipc_sock unix.StreamCo
 fn (nd &NetDevice) handle_getsockname(msg &IpcMsgSockname, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
     println("[IPC Sockname] ${msg.to_string()}")
 
-    mut sockaddr := SockAddrIn {
-        family: u16(C.AF_INET)
-        sin_addr: nd.my_ip
-    }
-    lock sock {
-        sockaddr.sin_port = sock.port
-    }
-
     mut res_sockname := IpcMsgSockname {
         IpcMsgBase : msg.IpcMsgBase
         socket: msg.socket
-        address_len : u32(sockaddr.len)
-        data: sockaddr.to_bytes()
+    }
+    lock sock {
+        if sock.domain == C.AF_INET {
+            addr := SockAddrIn {
+                family : u16(C.AF_INET)
+                sin_port : sock.port
+                sin_addr : nd.my_ip
+            }
+            res_sockname.address_len = u32(addr.len)
+            res_sockname.data = addr.to_bytes()
+        } else if sock.domain == C.AF_INET6 {
+            addr := SockAddrIn6 {
+                sin6_family : u16(C.AF_INET6)
+                sin6_port : sock.port
+                sin6_addr : nd.my_ipv6
+            }
+            res_sockname.address_len = u32(addr.len)
+            res_sockname.data = addr.to_bytes()
+        } else {
+            println("[IPC Sockname] Unknown")
+        }
     }
 
     mut res_msg := IpcMsgError {
@@ -279,7 +292,7 @@ fn (nd &NetDevice) handle_getsockname(msg &IpcMsgSockname, mut ipc_sock unix.Str
         data : res_sockname.to_bytes()[msg.IpcMsgBase.len..]
     }
 
-    println("[IPC Sockname] response addr(${sockaddr.to_string()})")
+    println("[IPC Sockname] response addr")
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
@@ -462,6 +475,41 @@ fn (nd &NetDevice) handle_setsockopt(msg &IpcMsgSockopt, mut ipc_sock unix.Strea
                 sock.option_ip_tos = tos_val
             }
             println("[IPC Setsockopt] Configured ip tos (value:${tos_val})")
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+    } else if msg.level == C.SOL_IPV6 {
+        if msg.optname == C.IPV6_RECVERR {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable ipv6 recverr")
+                lock sock {
+                    sock.option_ipv6_recverr = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable ipv6 recverr")
+                lock sock {
+                    sock.option_ipv6_recverr = false
+                }
+            }
+            ipc_sock.write(res_msg.to_bytes()) ?
+            return
+        }
+        if msg.optname == C.IPV6_RECVHOPLIMIT {
+            assert msg.optlen == 4
+            flag := bytes_to_int(msg.optval[0..4]) ?
+            if flag != 0 {
+                println("[IPC Setsockopt] Enable ipv6 recvhoplimit")
+                lock sock {
+                    sock.option_ipv6_recvhoplimit = true
+                }
+            } else {
+                println("[IPC Setsockopt] Disable ipv6 recvhoplimit")
+                lock sock {
+                    sock.option_ipv6_recvhoplimit = false
+                }
+            }
             ipc_sock.write(res_msg.to_bytes()) ?
             return
         }
@@ -696,6 +744,52 @@ fn (nd &NetDevice) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.StreamConn
         return
     }
 
+    if domain == C.AF_INET6 &&
+       sock_type == C.SOCK_DGRAM &&
+       protocol == C.IPPROTO_ICMPV6 {
+        mut pkt := Packet{
+            sockfd: msg.sockfd
+        }
+        parse_icmpv6_packet(mut pkt, msg.buf) ?
+        println("[IPC Sendto] Send From IPv4 Layer")
+        mut addr := SockAddrIn6{}
+        match msg.addr.addr {
+            SockAddrIn6 {
+                addr = msg.addr.addr
+            }
+            else {}
+        }
+        dest_addr := AddrInfo {
+            ipv6: addr.sin6_addr
+        }
+
+        mut success := true
+        mut ttl := 0
+        rlock {
+            ttl = sock.ttl
+        }
+        nd.send_ipv6(mut pkt, dest_addr, byte(ttl)) or { success = false }
+
+        mut res_msg := IpcMsgError {
+            IpcMsgBase : msg.IpcMsgBase
+            rc : 0
+            err : 0
+        }
+        println("[IPC Sendto] ${res_msg.to_string()}")
+        if !success {
+            res_msg.rc = -1
+            // is this ok ?
+            res_msg.err = C.EBADF
+            println("[IPC Sendto] sendto failed")
+        } else {
+            res_msg.rc = int(msg.buf.len)
+            println("[IPC Sendto] sendto success")
+        }
+        res_msg_bytes := res_msg.to_bytes()
+        ipc_sock.write(res_msg_bytes) ?
+        return
+    }
+
     if sock_type == C.SOCK_STREAM {
         op := TcpOps {
             msg: IpcMsg{msg: msg}
@@ -715,6 +809,8 @@ fn (nd &NetDevice) handle_sendto(msg &IpcMsgSendto, mut ipc_sock unix.StreamConn
         ipc_sock.write(res_msg.to_bytes()) ?
         return
     }
+
+    panic("UNNKOWN")
 }
 
 fn (nd &NetDevice) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamConn, shared sock Socket, shared sock_shared SocketShared) ? {
@@ -770,6 +866,9 @@ fn (nd &NetDevice) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamCo
         IcmpHdr {
             buf = l4_hdr.to_bytes()
         }
+        Icmpv6Hdr {
+            buf = l4_hdr.to_bytes()
+        }
         else {}
     }
     buf << pkt.payload
@@ -781,7 +880,17 @@ fn (nd &NetDevice) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamCo
             res.msg_namelen = 16
             res.addr = SockAddr {
                 addr : SockAddrIn {
+                    family : u16(C.AF_INET)
                     sin_addr : l3_hdr.src_addr
+                }
+            }
+        }
+        IPv6Hdr {
+            res.msg_namelen = 28
+            res.addr = SockAddr {
+                addr: SockAddrIn6 {
+                    sin6_family : u16(C.AF_INET6)
+                    sin6_addr: l3_hdr.src_addr
                 }
             }
         }
@@ -815,6 +924,7 @@ fn (nd &NetDevice) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamCo
         res.recvmsg_cmsghdr << cmsg_hdr.to_bytes()
     }
 
+
     res.msg_controllen = u64(res.recvmsg_cmsghdr.len)
 
     mut res_msg := IpcMsgError {
@@ -825,6 +935,7 @@ fn (nd &NetDevice) handle_recvmsg(msg &IpcMsgRecvmsg, mut ipc_sock unix.StreamCo
     }
 
     res_msg_bytes := res_msg.to_bytes()
+    println("[IPC Recvmsg] Address ${res.addr.to_string()}")
     println("[IPC Recvmsg] recvmsg success(size:${res_msg_bytes.len})")
     ipc_sock.write(res_msg_bytes) ?
 }

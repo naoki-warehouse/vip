@@ -190,6 +190,17 @@ fn (pkt &Packet) is_icmp_packet() bool {
     }
 }
 
+fn (pkt &Packet) is_icmpv6_packet() bool {
+    match pkt.l4_hdr {
+        Icmpv6Hdr {
+            return true
+        }
+        else {
+            return false
+        }
+    }
+}
+
 fn (pkt &Packet) is_tcp_packet() bool {
     match pkt.l4_hdr {
         TcpHdr {

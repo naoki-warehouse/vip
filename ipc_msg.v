@@ -31,13 +31,14 @@ mut:
 struct IpcMsgConnect {
     IpcMsgBase
     sockfd int
-    addr SockAddr
     addrlen u32
+    addr SockAddr
 }
 
 struct IpcMsgSockname {
     IpcMsgBase
     socket int
+mut:
     address_len u32
     data []byte
 }
@@ -140,6 +141,9 @@ fn domain_to_string(domain int) string {
     if domain == C.AF_INET {
         return "AF_INET"
     }
+    if domain == C.AF_INET6 {
+        return "AF_INET6"
+    }
     return "$domain"
 }
 
@@ -157,6 +161,9 @@ fn protocol_to_string(protocol int) string {
     if protocol == C.IPPROTO_ICMP {
         return "IPPROTO_ICMP"
     }
+    if protocol == C.IPPROTO_ICMPV6 {
+        return "IPPROTO_ICMPV6"
+    }
     if protocol == C.IPPROTO_IP {
         return "IPPROTO_IP"
     }
@@ -172,6 +179,9 @@ fn level_to_string(level int) string {
     }
     if level == C.SOL_IP {
         return "SOL_IP"
+    }
+    if level == C.SOL_IPV6 {
+        return "SOL_IPV6"
     }
     if level == C.SOL_TCP {
         return "SOL_TCP"
@@ -219,6 +229,16 @@ fn ip_optname_to_string(opt int) string {
     }
     if opt == C.IP_TOS {
         return "IP_TOS"
+    }
+    return "$opt"
+}
+
+fn ipv6_optname_to_string(opt int) string {
+    if opt == C.IPV6_RECVERR {
+        return "IPV6_RECVERR"
+    }
+    if opt == C.IPV6_RECVHOPLIMIT {
+        return "IPV6_RECVHOPLIMIT"
     }
     return "$opt"
 }
@@ -309,8 +329,8 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
             msg: IpcMsgConnect {
                 IpcMsgBase: base
                 sockfd : bytes_to_int(buf[6..10]) ?
-                addr : parse_sockaddr(buf[10..26]) ?
-                addrlen: bytes_to_u32(buf[26..30]) ?
+                addrlen: bytes_to_u32(buf[10..14]) ?
+                addr : parse_sockaddr(buf[14..]) ?
             }
         }
     }
@@ -372,11 +392,9 @@ fn parse_ipc_msg(buf []byte) ?IpcMsg {
             flags : bytes_to_int(buf[10..14]) ?
             addrlen : bytes_to_u32(buf[14..18]) ?
         }
-        msg.addr = parse_sockaddr(buf[18..18 + int(msg.addrlen)]) ?
-        mut offset := 18 + int(msg.addrlen)
-        if msg.addrlen == 0 {
-            offset += 16
-        }
+        msg.addr = parse_sockaddr(buf[18..18 + 128]) ?
+        println("addrlen:${msg.addr.to_string()}")
+        mut offset := 18 + 128
         msg.len = bytes_to_u64(buf[offset..offset+8]) ?
         offset += 8
         msg.buf = buf[offset..u64(offset) + msg.len]
@@ -536,6 +554,10 @@ fn (im IpcMsgRecvmsg) to_bytes() ?[]byte {
             copy(buf[offset..offset+16], sockaddr.to_bytes())
             offset += int(im.msg_namelen)
         }
+        SockAddrIn6 {
+            copy(buf[offset..offset+28], sockaddr.to_bytes())
+            offset += int(im.msg_namelen)
+        }
         else { return error("not expected sockaddr")}
     }
     copy(buf[offset..offset+int(im.msg_controllen)], im.recvmsg_cmsghdr)
@@ -625,6 +647,8 @@ fn (im IpcMsgSockopt) to_string() string {
         s += "optname:${socket_optname_to_string(im.optname)} "
     } else if im.level == C.SOL_IP {
         s += "optname:${ip_optname_to_string(im.optname)} "
+    } else if im.level == C.SOL_IPV6 {
+        s += "optname:${ipv6_optname_to_string(im.optname)} "
     } else if im.level == C.SOL_TCP {
         s += "optname:${tcp_optname_to_string(im.optname)} "
     }

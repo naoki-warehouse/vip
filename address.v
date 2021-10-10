@@ -170,7 +170,7 @@ mut:
 }
 
 
-type SockAddrType = SockAddrNone | SockAddrBase | SockAddrIn
+type SockAddrType = SockAddrNone | SockAddrBase | SockAddrIn | SockAddrIn6
 struct SockAddr {
     addr SockAddrType
 }
@@ -191,6 +191,16 @@ mut:
     sin_addr IPv4Address 
 }
 
+struct SockAddrIn6 {
+    len int = 28
+mut:
+    sin6_family u16 = u16(C.AF_INET6)
+    sin6_port u16
+    sin6_flowinfo u32
+    sin6_addr IPv6Address
+    sin6_scope_id u32
+}
+
 fn parse_sockaddr(buf []byte) ?SockAddr {
     if buf.len == 0 {
         return SockAddr {
@@ -206,6 +216,19 @@ fn parse_sockaddr(buf []byte) ?SockAddr {
                 family : family
                 sin_port : buf[2] << 8 | buf[3]
                 sin_addr : parse_ipv4_address(buf[4..8])
+            }
+        }
+    }
+
+    if family == C.AF_INET6 {
+        assert buf.len >= 28
+        return SockAddr {
+            addr : SockAddrIn6 {
+                sin6_family : family
+                sin6_port : be16(buf[2..4])
+                sin6_flowinfo : be_bytes_to_u32(buf[4..8]) ?
+                sin6_addr : parse_ipv6_address(buf[8..24])
+                sin6_scope_id : be_bytes_to_u32(buf[24..28]) ?
             }
         }
     }
@@ -229,6 +252,9 @@ fn (addr SockAddr) to_string() string {
         SockAddrIn {
             return  addr.addr.to_string()
         }
+        SockAddrIn6 {
+            return addr.addr.to_string()
+        }
     }
 }
 
@@ -236,6 +262,15 @@ fn (addr SockAddrIn) to_string() string {
     mut s := "family:AF_INET "
     s += "sin_port:${addr.sin_port} "
     s += "sin_addr:${addr.sin_addr.to_string()}"
+    return s
+}
+
+fn (addr SockAddrIn6) to_string() string {
+    mut s := "family:AF_INET6 "
+    s += "sin6_port:${addr.sin6_port} "
+    s += "sin6_flowinfo:0x${addr.sin6_flowinfo:08X} "
+    s += "sin6_addr:${addr.sin6_addr.to_string()} "
+    s += "sin6_scope_id:0x${addr.sin6_scope_id:08X}"
     return s
 }
 
@@ -248,6 +283,17 @@ fn (addr SockAddrIn) to_bytes() []byte {
     for i := 0; i < 4; i += 1 {
         buf[4+i] = addr.sin_addr.addr[i]
     }
+
+    return buf
+}
+
+fn (addr SockAddrIn6) to_bytes() []byte {
+    mut buf := []byte{len: addr.len}
+    copy(buf[0..2], u16_to_bytes(addr.sin6_family))
+    copy(buf[2..4], u16_to_bytes(addr.sin6_port))
+    copy(buf[4..8], u32_to_bytes(addr.sin6_flowinfo))
+    copy(buf[8..24], addr.sin6_addr.addr[0..])
+    copy(buf[24..28], u32_to_bytes(addr.sin6_scope_id))
 
     return buf
 }

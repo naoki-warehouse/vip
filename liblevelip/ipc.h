@@ -57,8 +57,8 @@ struct ipc_socket {
 
 struct ipc_connect {
     int sockfd;
-    struct sockaddr addr;
     socklen_t addrlen;
+    uint8_t addr[128];
 } __attribute__((packed));
 
 struct ipc_write {
@@ -71,7 +71,7 @@ struct ipc_sendto {
     int sockfd;
     int flags;
     socklen_t addrlen;
-    struct sockaddr addr;
+    uint8_t addr[128];
     uint64_t len;
     uint8_t buf[];
 } __attribute__((packed));

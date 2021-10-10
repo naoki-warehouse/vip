@@ -346,7 +346,36 @@ fn (mut nd NetDevice) handle_ipv6(pkt &Packet, ipv6_hdr &IPv6Hdr) ? {
     l4_hdr := pkt.l4_hdr
     match l4_hdr {
         Icmpv6Hdr {
-            nd.handle_icmpv6(pkt, l4_hdr)
+            for i := 0; i < nd.socks.len; i += 1 {
+                shared sock := nd.socks[i]
+                rlock sock {
+                    if !(sock.domain == C.AF_INET6 &&
+                       sock.sock_type == C.SOCK_DGRAM &&
+                       sock.protocol == C.IPPROTO_ICMPV6) {
+                        continue
+                    }
+
+                    if pkt.sockfd == sock.fd {
+                        continue
+                    }
+
+                    if !pkt.is_icmpv6_packet() {
+                        continue
+                    }
+
+                    println("[ICMPv6] handling sock(fd:${sock.fd})")
+                    res := sock.sock_chans.read_chan.try_push(pkt)
+                    println("[ICMPv6] handle sock(fd:${sock.fd})")
+                    println("[ICMPv6] sock_chans.read_chan.len:${sock.sock_chans.read_chan.len}")
+                    if res != .success {
+                        println("[ICMPv6] failed to push read_chan(fd:${sock.fd})")
+                    }
+                }
+            }
+
+            if pkt.sockfd != 1 {
+                nd.handle_icmpv6(pkt, l4_hdr)
+            }
         }
         else {}
     }
@@ -447,6 +476,14 @@ fn (nd NetDevice) handle_icmpv6_ns(pkt &Packet, icmpv6_hdr &Icmpv6HdrNeighborSol
 }
 
 fn (nd NetDevice) handle_icmpv6_echo(pkt &Packet, icmpv6_hdr &Icmpv6HdrEcho) {
+    ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
+    if ipv6_hdr.src_addr.to_string() == nd.my_ipv6.to_string() {
+        return
+    }
+    if ipv6_hdr.dst_addr.to_string() != nd.my_ipv6.to_string() {
+        return
+    }
+    println("[ICMPv6 Echo] ${ipv6_hdr.to_string()}")
     println("[ICMPv6 Echo] ${icmpv6_hdr.to_string()}")
 
     icmp_reply := Icmpv6HdrEcho {
@@ -462,7 +499,6 @@ fn (nd NetDevice) handle_icmpv6_echo(pkt &Packet, icmpv6_hdr &Icmpv6HdrEcho) {
     mut send_pkt := Packet{}
     send_pkt.payload = pkt.payload
     send_pkt.l4_hdr = Icmpv6Hdr{ hdr: icmp_reply }
-    ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {return}
     dst_addr := AddrInfo {
         ipv6: ipv6_hdr.src_addr
     }
@@ -728,7 +764,7 @@ fn (nd NetDevice) send_ipv6(mut pkt &Packet, dst_addr &AddrInfo, hop_limit byte)
                 ipv6: resolve_addr.get_ns_multicast_addr()
             }
             nd.send_ipv6(mut ns_pkt, &resolve_dst_addr, 255) ?
-            time.sleep(1 * time.second)
+            time.sleep(100 * time.millisecond)
             dmac_rev = nd.get_nt_col(resolve_addr)
             resolve_try_num += 1
         }
