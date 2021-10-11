@@ -402,19 +402,29 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
         mut ttl := 0
         mut nodelay := false
         mut nonblock := false
+        mut domain := 0
         rlock sock {
             port = sock.port
             ttl = sock.ttl
             nodelay = sock.option_tcp_nodelay
             nonblock = sock.option_fd_nonblock
+            domain = sock.domain
         }
         select {
             pkt = <- sock_chan.read_chan {
-                recv_ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
-                recv_tcp_hdr := pkt.l4_hdr.get_tcp_hdr() or {continue}
-                if recv_ipv4_hdr.src_addr.to_string() != session.peer_addr.ipv4.to_string() {
-                    continue
+                if domain == C.AF_INET {
+                    recv_ipv4_hdr := pkt.l3_hdr.get_ipv4_hdr() or {continue}
+                    if recv_ipv4_hdr.src_addr != session.peer_addr.ipv4 {
+                        continue
+                    }
+                } else if domain == C.AF_INET6 {
+                    recv_ipv6_hdr := pkt.l3_hdr.get_ipv6_hdr() or {continue}
+                    if recv_ipv6_hdr.src_addr != session.peer_addr.ipv6 {
+                        continue
+                    }
                 }
+
+                recv_tcp_hdr := pkt.l4_hdr.get_tcp_hdr() or {continue}
                 if recv_tcp_hdr.src_port != session.peer_addr.port {
                     continue
                 }
@@ -440,7 +450,11 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                     }
                     mut send_pkt := Packet{}
                     send_pkt.l4_hdr = tcp_hdr
-                    nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                    if domain == C.AF_INET {
+                        nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                    } else if domain == C.AF_INET6 {
+                        nd.send_ipv6(mut send_pkt, &session.peer_addr, 255) or {println("failed to send ack")}
+                    }
                     session.last_send_pkt = pkt
                     session.send_data_base_num = session.seq_num
                     session.state = TcpState.established
@@ -508,7 +522,11 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                     session.retransmit = session.recv_ring.is_partially_lost()
                     if ((recv_tcp_hdr.control_flags & tcp_psh > 0 || nodelay) && (pkt.payload.len > 0)) || session.ack_is_pending {
                         if sock_chan.read_chan.len == 0 {
-                            nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                            if domain == C.AF_INET {
+                                nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                            } else if domain == C.AF_INET6 {
+                                nd.send_ipv6(mut send_pkt, &session.peer_addr, 255) or {println("failed to send ack")}
+                            }
                             session.ack_is_pending = false
                         } else {
                             session.ack_is_pending = true
@@ -595,7 +613,11 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
                 if session.retransmit && session.state != TcpState.closed {
                     if session.state == TcpState.established && session.retransmit_num < 10 {
                         println("[TCP $fd] Retransmission")
-                        nd.send_ipv4(mut session.last_send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                        if domain == C.AF_INET {
+                            nd.send_ipv4(mut session.last_send_pkt, &session.peer_addr, ttl) or {println("failed to send ack")}
+                        } else if domain == C.AF_INET6 {
+                            nd.send_ipv6(mut session.last_send_pkt, &session.peer_addr, 255) or {println("failed to send ack")}
+                        }
                         session.retransmit = session.recv_ring.is_partially_lost() || session.send_data.len != 0
                         println("[TCP $fd] IsPartiallyLost:${session.recv_ring.is_partially_lost()}")
                         println("[TCP $fd] send_data.len:${session.send_data.len}")
@@ -613,18 +635,13 @@ fn (nd &NetDevice) handle_tcp_sock(shared sock Socket) {
 fn (nd &NetDevice) tcp_connect(msg &IpcMsgConnect, mut session TcpSession, shared sock Socket) ? {
     mut port := u16(0)
     mut ttl := 0
+    mut domain := 0
     rlock sock {
         port = sock.port
         ttl = sock.ttl
+        domain = sock.domain
     }
     mut dst_addr := AddrInfo{}
-    addr := msg.addr.addr
-    match addr {
-        SockAddrIn {
-            dst_addr.ipv4 = addr.sin_addr
-            dst_addr.port = addr.sin_port
-        } else {}
-    }
     session.seq_num = u16(rand.u32())
     mut tcp_hdr := TcpHdr {
         src_port : port
@@ -636,8 +653,24 @@ fn (nd &NetDevice) tcp_connect(msg &IpcMsgConnect, mut session TcpSession, share
         window_size: 4000
     }
     mut pkt := Packet{}
-    pkt.l4_hdr = tcp_hdr
-    nd.send_ipv4(mut pkt, &dst_addr, ttl)?
+    addr := msg.addr.addr
+    match addr {
+        SockAddrIn {
+            dst_addr.ipv4 = addr.sin_addr
+            dst_addr.port = addr.sin_port
+            tcp_hdr.dst_port = dst_addr.port
+            pkt.l4_hdr = tcp_hdr
+            nd.send_ipv4(mut pkt, &dst_addr, ttl)?
+        } 
+        SockAddrIn6 {
+            dst_addr.ipv6 = addr.sin6_addr
+            dst_addr.port = addr.sin6_port
+            tcp_hdr.dst_port = dst_addr.port
+            pkt.l4_hdr = tcp_hdr
+            nd.send_ipv6(mut pkt, &dst_addr, 255)?
+        }
+        else {}
+    }
     session.state = TcpState.syn_sent
     session.peer_addr = dst_addr
     session.last_send_pkt = pkt
@@ -711,17 +744,33 @@ fn (nd &NetDevice) tcp_getsockopt(msg &IpcMsgSockopt, session &TcpSession, mut i
 }
 
 fn (nd &NetDevice) tcp_getpeername(msg &IpcMsgSockname, session &TcpSession, mut ipc_sock unix.StreamConn, shared sock Socket) ? {
-    mut sockaddr := SockAddrIn {
-        family: u16(C.AF_INET)
-        sin_addr: session.peer_addr.ipv4
-        sin_port: session.peer_addr.port
-    }
 
     mut res_sockname := IpcMsgSockname {
         IpcMsgBase : msg.IpcMsgBase
         socket: msg.socket
-        address_len : u32(sockaddr.len)
-        data: sockaddr.to_bytes()
+    }
+
+    mut domain := 0
+    rlock sock {
+        domain = sock.domain
+    }
+
+    if domain == C.AF_INET {
+        mut sockaddr := SockAddrIn {
+            family: u16(C.AF_INET)
+            sin_addr: session.peer_addr.ipv4
+            sin_port: session.peer_addr.port
+        }
+        res_sockname.address_len = u32(sockaddr.len)
+        res_sockname.data = sockaddr.to_bytes()
+    } else if domain == C.AF_INET6 {
+        mut sockaddr := SockAddrIn6 {
+            sin6_family: u16(C.AF_INET6)
+            sin6_addr: session.peer_addr.ipv6
+            sin6_port: session.peer_addr.port
+        }
+        res_sockname.address_len = u32(sockaddr.len)
+        res_sockname.data = sockaddr.to_bytes()
     }
 
     mut res_msg := IpcMsgError {
@@ -731,16 +780,18 @@ fn (nd &NetDevice) tcp_getpeername(msg &IpcMsgSockname, session &TcpSession, mut
         data : res_sockname.to_bytes()[msg.IpcMsgBase.len..]
     }
 
-    println("[IPC Sockname] response addr(${sockaddr.to_string()})")
+    println("[IPC Sockname] response addr")
     ipc_sock.write(res_msg.to_bytes()) ?
 }
 
 fn (nd &NetDevice) tcp_sendto(msg &IpcMsgSendto, mut session &TcpSession, shared sock Socket) ? {
     mut port := u16(0)
     mut ttl := 0
+    mut domain := 0
     rlock sock {
         port = sock.port
         ttl = sock.ttl
+        domain = sock.domain
     }
     for i := 0; i < msg.buf.len; i += session.mss {
         mut tcp_hdr := TcpHdr {
@@ -760,7 +811,11 @@ fn (nd &NetDevice) tcp_sendto(msg &IpcMsgSendto, mut session &TcpSession, shared
         }
         send_pkt.payload = msg.buf[i..i+data_size]
         session.send_data << msg.buf[i..i+data_size]
-        nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl)?
+        if domain == C.AF_INET {
+            nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl)?
+        } else if domain == C.AF_INET6 {
+            nd.send_ipv6(mut send_pkt, &session.peer_addr, 255)?
+        }
         session.last_send_pkt = send_pkt
         session.retransmit = true
     }
@@ -769,9 +824,11 @@ fn (nd &NetDevice) tcp_sendto(msg &IpcMsgSendto, mut session &TcpSession, shared
 fn (nd &NetDevice) tcp_write(msg &IpcMsgWrite, mut session &TcpSession, shared sock Socket) ? {
     mut port := u16(0)
     mut ttl := 0
+    mut domain := 0
     rlock sock {
         port = sock.port
         ttl = sock.ttl
+        domain = sock.domain
     }
     for i := 0; i < msg.buf.len; i += session.mss {
         mut tcp_hdr := TcpHdr {
@@ -791,7 +848,11 @@ fn (nd &NetDevice) tcp_write(msg &IpcMsgWrite, mut session &TcpSession, shared s
         }
         send_pkt.payload = msg.buf[i..i+data_size]
         session.send_data << msg.buf[i..i+data_size]
-        nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl)?
+        if domain == C.AF_INET {
+            nd.send_ipv4(mut send_pkt, &session.peer_addr, ttl)?
+        } else if domain == C.AF_INET6 {
+            nd.send_ipv6(mut send_pkt, &session.peer_addr, 255)?
+        }
         session.last_send_pkt = send_pkt
         session.retransmit = true
     }
@@ -815,9 +876,11 @@ fn (nd &NetDevice) tcp_read(msg &IpcMsgRead, mut session TcpSession, mut ipc_soc
 fn (nd &NetDevice) tcp_close(msg &IpcMsgClose, mut session TcpSession, sock_chan &TcpSocketChans, shared sock Socket) ? {
     mut port := u16(0)
     mut ttl := 0
+    mut domain := 0
     rlock sock {
         port = sock.port
         ttl = sock.ttl
+        domain = sock.domain
     }
 
     mut tcp_hdr := TcpHdr {
@@ -831,7 +894,11 @@ fn (nd &NetDevice) tcp_close(msg &IpcMsgClose, mut session TcpSession, sock_chan
     }
     mut pkt := Packet{}
     pkt.l4_hdr = tcp_hdr
-    nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+    if domain == C.AF_INET {
+        nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+    } else if domain == C.AF_INET6 {
+        nd.send_ipv6(mut pkt, &session.peer_addr, 255)?
+    }
     session.last_send_pkt = pkt
     if session.state == TcpState.close_wait {
         session.state = TcpState.last_ack
@@ -879,14 +946,22 @@ fn (nd &NetDevice) tcp_close(msg &IpcMsgClose, mut session TcpSession, sock_chan
                     tcp_hdr.ack_num = session.ack_num
                     tcp_hdr.control_flags = u8(tcp_ack)
                     pkt.l4_hdr = tcp_hdr
-                    nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+                    if domain == C.AF_INET {
+                        nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+                    } else if domain == C.AF_INET6 {
+                        nd.send_ipv6(mut pkt, &session.peer_addr, 255)?
+                    }
                     session.last_send_pkt = pkt
                     session.state = TcpState.closed
                     return
                 }
             }   
             3 * time.second {
-                nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+                if domain == C.AF_INET {
+                    nd.send_ipv4(mut pkt, &session.peer_addr, ttl)?
+                } else if domain == C.AF_INET6 {
+                    nd.send_ipv6(mut pkt, &session.peer_addr, 255)?
+                }
                 session.last_send_pkt = pkt
             }
         }

@@ -377,6 +377,11 @@ fn (mut nd NetDevice) handle_ipv6(pkt &Packet, ipv6_hdr &IPv6Hdr) ? {
                 nd.handle_icmpv6(pkt, l4_hdr)
             }
         }
+        TcpHdr {
+            if pkt.sockfd != 1 {
+                nd.handle_tcp(pkt, &l4_hdr)
+            }
+        }
         else {}
     }
 }
@@ -512,7 +517,7 @@ fn (nd NetDevice) handle_tcp(pkt &Packet, tcp_hdr &TcpHdr) {
     for i := 0; i < nd.socks.len; i += 1 {
         shared sock := nd.socks[i]
         rlock sock {
-            if !(sock.domain == C.AF_INET &&
+            if !((sock.domain == C.AF_INET || sock.domain == C.AF_INET6) &&
                sock.sock_type == C.SOCK_STREAM &&
                (sock.protocol == C.IPPROTO_IP || sock.protocol == C.IPPROTO_TCP)) {
                 continue
@@ -731,6 +736,23 @@ fn (nd NetDevice) send_ipv6(mut pkt &Packet, dst_addr &AddrInfo, hop_limit byte)
             ipv6_hdr.payload_length = u16(icmp_bytes.len)
             ipv6_hdr.next_header = byte(IPv6Protocol.icmpv6)
         }
+        TcpHdr {
+            l4_size := l4_hdr.data_offset + pkt.payload.len
+            l4_hdr.chksum = 0
+            ph := PseudoHdrv6 {
+                src_addr : nd.my_ipv6
+                dst_addr : dst_addr.ipv6
+                length : u32(l4_size)
+                next_header: byte(IPv6Protocol.tcp)
+            }
+            mut pseudo_bytes := ph.to_bytes()
+            pseudo_bytes << l4_hdr.to_bytes()
+            pseudo_bytes << pkt.payload
+            l4_hdr.chksum = calc_chksum(pseudo_bytes)
+
+            ipv6_hdr.payload_length = u16(l4_size)
+            ipv6_hdr.next_header = byte(IPv6Protocol.tcp)
+        }
         else {
         }
     }
@@ -764,7 +786,7 @@ fn (nd NetDevice) send_ipv6(mut pkt &Packet, dst_addr &AddrInfo, hop_limit byte)
                 ipv6: resolve_addr.get_ns_multicast_addr()
             }
             nd.send_ipv6(mut ns_pkt, &resolve_dst_addr, 255) ?
-            time.sleep(100 * time.millisecond)
+            time.sleep(500 * time.millisecond)
             dmac_rev = nd.get_nt_col(resolve_addr)
             resolve_try_num += 1
         }

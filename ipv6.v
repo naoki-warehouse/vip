@@ -18,6 +18,7 @@ mut:
 }
 
 enum IPv6Protocol {
+    tcp = 6
     icmpv6 = 58
 }
 
@@ -37,6 +38,9 @@ fn parse_ipv6_hdr(buf []byte) ?IPv6Hdr {
 
     if hdr.next_header == byte(IPv6Protocol.icmpv6) {
         hdr.protocol = IPv6Protocol.icmpv6
+    }
+    if hdr.next_header == byte(IPv6Protocol.tcp) {
+        hdr.protocol = IPv6Protocol.tcp
     }
 
     hdr.hdr_len = 40

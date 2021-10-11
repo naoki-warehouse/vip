@@ -106,6 +106,9 @@ fn parse_ipv6_packet(mut pkt Packet, buf []byte) ? {
     if ipv6_hdr.protocol == IPv6Protocol.icmpv6 {
         return parse_icmpv6_packet(mut pkt, buf[ipv6_hdr.hdr_len..])
     }
+    if ipv6_hdr.protocol == IPv6Protocol.tcp {
+        return parse_tcp_packet(mut pkt, buf[ipv6_hdr.hdr_len..])
+    }
 }
 
 fn parse_icmp_packet(mut pkt Packet, buf []byte) ? {
