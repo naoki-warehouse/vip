@@ -1,47 +1,23 @@
 module main
 
-import os
-
-#include <linux/if.h>
-#include <linux/if_tun.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-
-fn C.ioctl(fd int, request u64, arg voidptr) int
-
-//const ifname_size = C.IFNAMSIZ
-const ifname_size = 16
-
-struct C.ifreq {
-mut:
-    ifr_name [ifname_size]char
-    ifr_flags u16
-}
-
 fn main(){
-    println("Hello World!")
-}
+    mut netdev := new_netdevice() or { panic(err) }
+    netdev.create_tap() or { panic(err) }
+    println("NetDevice Info:\n" + netdev.str())
 
-fn tap_alloc(tun_dev_name string) ?os.File{
-    mut f := os.File{}
-    mut ifr := C.ifreq{}
-    f = os.open_file("/dev/net/tun", "r+") ?
-
-    ifr.ifr_flags = u16(C.IFF_TAP | C.IFF_NO_PI)
-    mut idx := 0
-    for mut c in ifr.ifr_name {
-        if idx >= tun_dev_name.len {
-            c = 0
-        } else {
-            c = tun_dev_name[idx]
+    for true {
+        mut buf := []byte{len: 9000}
+        count := C.read(netdev.tap_fd.fd, buf.data, sizeof(buf))
+        println("recv $count")
+        if count == 0 {
+            continue
         }
-        idx++
+        mut offset := 0
+        mut pkt := new_packet()
+        offset += pkt.parse_l2_header(buf[offset..])?
+        offset += pkt.parse_l3_header(buf[offset..]) or { panic(err) }
+        println("$pkt")
+        netdev.handle_pkt(&pkt)
     }
-
-    mut err := C.ioctl(f.fd, C.TUNSETIFF, &ifr)
-    if err < 0 {
-        return error("falied to ioctl")
-    }
-
-    return f
 }
+
