@@ -88,3 +88,40 @@ fn (ap &ArpHdr) write_bytes(mut buf []byte) ?int {
 
     return offset
 }
+
+fn (mut nd NetDevice) handle_arp_reply(ap &ArpHdr) {
+	nd.arp_table.insert(ArpTableCol{mac: ap.sha, ip: ap.spa})
+}
+
+fn (mut nd NetDevice) handle_arp_request (ap &ArpHdr, sock_addr &SocketAddress) {
+	nd.arp_table.insert(ArpTableCol{mac: ap.sha, ip: ap.spa})
+
+
+	mut res_pkt := Packet {
+		l2_hdr: &HdrNone {}
+		l3_hdr: &ArpHdr {
+			hw_type: conv.htn16(u16(ArpHWType.ethernet)),
+			proto_type: conv.htn16(u16(ArpProtoType.ipv4)),
+			hw_size: 6,
+			proto_size: 4,
+			op: conv.htn16(u16(ArpOpcode.reply)),
+			sha: nd.physical_addr,
+			spa: nd.ip_addr,
+			tha: ap.sha,
+			tpa: ap.spa,
+		}
+		l4_hdr: &HdrNone{}
+		payload: []byte{}
+	}
+
+	nd.send_ethernet(mut res_pkt, sock_addr) or {panic(err)}
+}
+
+fn (mut nd NetDevice) handle_arp (pkt &Packet, ap &ArpHdr, sock_addr &SocketAddress) {
+	op := conv.nth16(ap.op)
+	if op == u16(ArpOpcode.request) {
+		nd.handle_arp_request(ap, sock_addr)
+	} else if op == u16(ArpOpcode.reply) {
+		nd.handle_arp_reply(ap)
+	}
+}

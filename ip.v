@@ -82,3 +82,46 @@ fn (ip &IpHdrBase) str() string {
     s += "dst_addr:${ip.dst_addr}"
 	return s
 }
+
+fn (mut nd NetDevice) handle_ip(pkt &Packet, ip &IpHdr, mut sock_addr SocketAddress) {
+	l4_hdr := pkt.l4_hdr
+	match l4_hdr {
+		HdrNone {
+
+		}
+		IcmpHdr {
+			nd.handle_icmp(pkt, l4_hdr, mut sock_addr)
+		}
+	}
+}
+
+fn (mut nd NetDevice) send_ip(mut pkt Packet, dst_addr &SocketAddress)? {
+	mut ip_hdr_base := &IpHdrBase {
+		vh: (4 << 4) | (5)
+		tos: 0
+		total_len: conv.htn16(u16(20 + pkt.l4_hdr.len() + pkt.payload.len))
+		id: 0x1234
+		fragment: 0
+		ttl: 64
+		protocol: 0
+		chksum: 0
+		src_addr: nd.ip_addr
+		dst_addr: dst_addr.ip_addr
+	}
+
+	l4_hdr := pkt.l4_hdr
+	match l4_hdr {
+		HdrNone {
+			panic("l4_hdr is not set")
+		}
+		IcmpHdr {
+			ip_hdr_base.protocol = 1
+		}
+	}
+
+	pkt.l3_hdr = &IpHdr {
+		base: ip_hdr_base
+	}
+
+	return nd.send_ethernet(mut pkt, dst_addr)
+}

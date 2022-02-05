@@ -122,3 +122,42 @@ fn (ih &IcmpHdr) write_bytes(mut buf []byte) ?int {
     }
     return offset
 }
+
+fn (mut nd NetDevice) handle_icmp(pkt &Packet, icmp &IcmpHdr, mut sock_addr SocketAddress) {
+	icmp_typ := icmp.typ
+	match icmp_typ {
+		IcmpHdrUnknown {}
+		IcmpHdrEcho {
+			nd.handle_icmp_echo(pkt, icmp_typ, sock_addr)
+		}
+	}
+}
+
+fn (mut nd NetDevice) handle_icmp_echo(pkt &Packet, icmp &IcmpHdrEcho, sock_addr &SocketAddress) {
+	println("$icmp")
+	mut s := "payload: ["
+	for i := 0; i < pkt.payload.len; i += 1 {
+		s += "0x${pkt.payload[i]:02X} "
+	}
+	s += "]"
+	println(s)
+
+	mut res_pkt := Packet {
+		l2_hdr: &HdrNone {}
+		l3_hdr: &HdrNone {}
+		l4_hdr: &IcmpHdr {
+			base: &IcmpHdrBase {
+				icmp_type: u8(IcmpType.echo_reply)
+				code: 0
+				chksum: 0
+			}
+			typ: &IcmpHdrEcho {
+				id: icmp.id
+				seq_num: icmp.seq_num
+			}
+		}
+		payload: pkt.payload
+	}
+
+	nd.send_ip(mut res_pkt, sock_addr) or {panic(err)}
+}
