@@ -12,6 +12,13 @@ struct IpAddress {
     addr [4]byte
 }
 
+struct SocketAddress {
+mut:
+	physical_addr PhysicalAddress
+	ip_addr IpAddress
+	port u16
+}
+
 fn new_physical_address_from_buf(buf [6]byte) ?PhysicalAddress {
 	return PhysicalAddress {
 		addr: buf

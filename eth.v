@@ -6,6 +6,7 @@ import net.conv
 struct EthHdr {
     dmac PhysicalAddress
     smac PhysicalAddress
+mut:
     ether_type u16
 }
 

@@ -6,16 +6,13 @@ fn main(){
     println("NetDevice Info:\n" + netdev.str())
 
     for true {
-        mut buf := []byte{len: 9000}
-        count := C.read(netdev.tap_fd.fd, buf.data, sizeof(buf))
+        mut buf := [9000]byte{}
+        count := C.read(netdev.tap_fd.fd, &buf[0], sizeof(buf))
         println("recv $count")
         if count == 0 {
             continue
         }
-        mut offset := 0
-        mut pkt := new_packet()
-        offset += pkt.parse_l2_header(buf[offset..])?
-        offset += pkt.parse_l3_header(buf[offset..]) or { panic(err) }
+        mut pkt := parse_packet(buf[0..count]) or { panic(err) }
         println("$pkt")
         netdev.handle_pkt(&pkt)
     }
