@@ -55,31 +55,3 @@ fn (nd NetDevice) str() string {
 
 	return s
 }
-
-/*
-fn (nd &NetDevice) handle_pkt(pkt &Packet) {
-	mut sock_addr := SocketAddress{}
-	l2_hdr := pkt.l2_hdr
-	match l2_hdr {
-		HdrNone {
-			return
-		}
-		EthHdr {
-			sock_addr.physical_addr = l2_hdr.smac
-		}
-	}
-
-    l3_hdr := pkt.l3_hdr
-    match l3_hdr {
-        HdrNone {
-        }
-        ArpHdr {
-            sock.handle_arp(pkt, l3_hdr, sock_addr)
-        }
-		IpHdr {
-			sock_addr.ip_addr = l3_hdr.base.src_addr
-			sock.handle_ip(pkt, l3_hdr, mut sock_addr)
-		}
-    }
-}
-*/

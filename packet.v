@@ -4,7 +4,7 @@ import net.conv
 
 type L2Hdr = HdrNone | EthHdr
 type L3Hdr = HdrNone | ArpHdr | IpHdr
-type L4Hdr = HdrNone | IcmpHdr
+type L4Hdr = HdrNone | IcmpHdr | UdpHdr
 
 struct HdrNone {}
 
@@ -70,6 +70,9 @@ fn (hdr &L4Hdr) len() int {
 		IcmpHdr {
 			return hdr.len()
 		}
+		UdpHdr {
+			return hdr.len()
+		}
 	}
 }
 
@@ -79,6 +82,9 @@ fn (hdr &L4Hdr) write_bytes(mut buf []byte) ?int {
 			return 0	
 		}
 		IcmpHdr {
+			return hdr.write_bytes(mut buf)
+		}
+		UdpHdr {
 			return hdr.write_bytes(mut buf)
 		}
 	}
@@ -156,6 +162,10 @@ fn (mut pkt Packet) parse_l4_header(buf []byte) ?int {
 				icmp_hdr := parse_icmp_header(buf)?
 				pkt.l4_hdr = icmp_hdr
 				return icmp_hdr.len()
+			} else if protocol == 17 {
+				udp_hdr := parse_udp_header(buf)?
+				pkt.l4_hdr = udp_hdr
+				return udp_hdr.len()
 			} else {
 				return error("unknown ip protocol ${protocol}")
 			}
@@ -197,6 +207,10 @@ fn (pkt &Packet) write_bytes(mut buf []byte) ?int {
 		IcmpHdr {
 			chksum := calc_chksum(buf[l4_hdr_offset..offset])
 			copy(buf[l4_hdr_offset+2..], be_u16_to_bytes(chksum))
+		}
+		UdpHdr {
+			chksum := calc_chksum(buf[l4_hdr_offset..offset])
+			copy(buf[l4_hdr_offset+6..], be_u16_to_bytes(chksum))
 		}
 	}
 	return offset

@@ -91,3 +91,14 @@ fn calc_chksum(buf []byte) u16 {
 
     return u16((~chksum) & 0xFFFF)
 }
+
+fn calc_pseudo_header(src_addr &IpAddress, dst_addr &IpAddress, protocol u8, length u16) u16 {
+    mut buf := []byte{len:12}
+    copy(buf[0..], src_addr.addr[0..])
+    copy(buf[4..], dst_addr.addr[0..])
+    buf[8] = 0
+    buf[9] = protocol
+    copy(buf[10..], be_u16_to_bytes(length))
+    chksum := calc_chksum(buf[0..])
+    return ~chksum
+}

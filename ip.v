@@ -86,8 +86,10 @@ fn (ip &IpHdrBase) str() string {
 fn (nd &NetDevice) handle_ip(pkt &Packet) {
 	l4_hdr := pkt.l4_hdr
 	match l4_hdr {
-		HdrNone {
-		}
+		HdrNone {}
+        UdpHdr {
+
+        }
 		IcmpHdr {
             nd.icmp_chan.recv_chan <- pkt
 		}
@@ -116,6 +118,9 @@ fn (sock &Socket) create_ip(mut pkt Packet, dst_addr &SocketAddress)? {
 		IcmpHdr {
 			ip_hdr_base.protocol = 1
 		}
+        UdpHdr {
+            ip_hdr_base.protocol = 17
+        }
 	}
 
 	pkt.l3_hdr = &IpHdr {

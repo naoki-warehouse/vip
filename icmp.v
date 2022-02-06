@@ -199,6 +199,7 @@ fn icmp_handler(ih IcmpHandler) {
         l4_hdr := pkt.l4_hdr
         match l4_hdr {
             HdrNone { continue }
+            UdpHdr { continue }
             IcmpHdr { 
                 sock.handle_icmp(pkt, l4_hdr, sock_addr)
             }
