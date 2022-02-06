@@ -1,25 +1,45 @@
 module main
 
 import os
-import net.conv
 
 struct NetDevice {
 	tap_name string
 	tap_recv_chan chan []byte
 	physical_addr PhysicalAddress
 	ip_addr IpAddress
+	arp_chan NetDeviceChannel
+	icmp_chan NetDeviceChannel
+	send_chan chan &Packet
 mut:
+	socket_chans map[string]NetDeviceChannel
 	arp_table shared ArpTable
 	tap_fd os.File
 }
 
+struct NetDeviceChannel {
+	recv_chan chan &Packet
+	send_chan chan &Packet
+}
+
 fn new_netdevice() ?NetDevice {
+	send_chan := chan &Packet{cap: 10}
 	return NetDevice {
 		tap_name: "vip-test"
 		tap_recv_chan: chan []byte{cap: 10}
 		physical_addr: parse_physical_address("52:54:00:4D:3F:E4")?
 		ip_addr: parse_ip_address("192.168.10.2")?
+		arp_chan: new_netdevice_channel(send_chan)
+		icmp_chan: new_netdevice_channel(send_chan)
+		send_chan: send_chan
+		socket_chans: map[string]NetDeviceChannel{}
 		arp_table: new_arp_table()
+	}
+}
+
+fn new_netdevice_channel(send_chan chan &Packet) NetDeviceChannel {
+	return NetDeviceChannel{
+		recv_chan: chan &Packet{cap: 10}
+		send_chan: send_chan
 	}
 }
 
@@ -36,13 +56,8 @@ fn (nd NetDevice) str() string {
 	return s
 }
 
-fn (mut nd NetDevice) send_packet(pkt &Packet)? {
-	mut buf := []byte{len:9000}
-	send_size := pkt.write_bytes(mut buf)?
-	C.write(nd.tap_fd.fd, buf.data, send_size)
-}
-
-fn (mut nd NetDevice) handle_pkt(pkt &Packet) {
+/*
+fn (nd &NetDevice) handle_pkt(pkt &Packet) {
 	mut sock_addr := SocketAddress{}
 	l2_hdr := pkt.l2_hdr
 	match l2_hdr {
@@ -59,11 +74,12 @@ fn (mut nd NetDevice) handle_pkt(pkt &Packet) {
         HdrNone {
         }
         ArpHdr {
-            nd.handle_arp(pkt, l3_hdr, sock_addr)
+            sock.handle_arp(pkt, l3_hdr, sock_addr)
         }
 		IpHdr {
 			sock_addr.ip_addr = l3_hdr.base.src_addr
-			nd.handle_ip(pkt, l3_hdr, mut sock_addr)
+			sock.handle_ip(pkt, l3_hdr, mut sock_addr)
 		}
     }
 }
+*/

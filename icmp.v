@@ -123,17 +123,18 @@ fn (ih &IcmpHdr) write_bytes(mut buf []byte) ?int {
     return offset
 }
 
-fn (mut nd NetDevice) handle_icmp(pkt &Packet, icmp &IcmpHdr, mut sock_addr SocketAddress) {
+fn (sock &IcmpHandler) handle_icmp(pkt &Packet, icmp &IcmpHdr, sock_addr &SocketAddress) {
 	icmp_typ := icmp.typ
 	match icmp_typ {
 		IcmpHdrUnknown {}
 		IcmpHdrEcho {
-			nd.handle_icmp_echo(pkt, icmp_typ, sock_addr)
+			sock.handle_icmp_echo(pkt, icmp_typ, sock_addr)
 		}
 	}
 }
 
-fn (mut nd NetDevice) handle_icmp_echo(pkt &Packet, icmp &IcmpHdrEcho, sock_addr &SocketAddress) {
+fn (sock &IcmpHandler) handle_icmp_echo(pkt &Packet, icmp &IcmpHdrEcho, sock_addr &SocketAddress) {
+    /*
 	println("$icmp")
 	mut s := "payload: ["
 	for i := 0; i < pkt.payload.len; i += 1 {
@@ -141,6 +142,7 @@ fn (mut nd NetDevice) handle_icmp_echo(pkt &Packet, icmp &IcmpHdrEcho, sock_addr
 	}
 	s += "]"
 	println(s)
+    */
 
 	mut res_pkt := Packet {
 		l2_hdr: &HdrNone {}
@@ -159,5 +161,47 @@ fn (mut nd NetDevice) handle_icmp_echo(pkt &Packet, icmp &IcmpHdrEcho, sock_addr
 		payload: pkt.payload
 	}
 
-	nd.send_ip(mut res_pkt, sock_addr) or {panic(err)}
+    sock.create_ip(mut res_pkt, sock_addr) or { panic(err) }
+    sock.netdevice_chan.send_chan <- &res_pkt
+}
+
+struct IcmpHandler {
+    Socket
+}
+
+fn new_icmp_handler(nd &NetDevice) IcmpHandler {
+    shared at := nd.arp_table
+    return IcmpHandler {
+        new_socket(nd, nd.icmp_chan, shared at)
+    }
+}
+
+fn icmp_handler(ih IcmpHandler) {
+    mut sock := ih
+    for true {
+        pkt := <- sock.netdevice_chan.recv_chan
+        mut sock_addr := SocketAddress{}
+        l2_hdr := pkt.l2_hdr
+        match l2_hdr {
+            HdrNone { continue }
+            EthHdr {
+                sock_addr.physical_addr = l2_hdr.smac
+            }
+        }
+        l3_hdr := pkt.l3_hdr
+        match l3_hdr {
+            HdrNone { continue }
+            ArpHdr { continue}
+            IpHdr { 
+                sock_addr.ip_addr = l3_hdr.base.src_addr
+            }
+        }
+        l4_hdr := pkt.l4_hdr
+        match l4_hdr {
+            HdrNone { continue }
+            IcmpHdr { 
+                sock.handle_icmp(pkt, l4_hdr, sock_addr)
+            }
+        }
+    }
 }

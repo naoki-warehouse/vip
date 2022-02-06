@@ -89,14 +89,30 @@ fn (ap &ArpHdr) write_bytes(mut buf []byte) ?int {
     return offset
 }
 
-fn (mut nd NetDevice) handle_arp_reply(ap &ArpHdr) {
-	nd.arp_table.insert(ArpTableCol{mac: ap.sha, ip: ap.spa})
+
+struct ArpHandler {
+    Socket
 }
 
-fn (mut nd NetDevice) handle_arp_request (ap &ArpHdr, sock_addr &SocketAddress) {
-	nd.arp_table.insert(ArpTableCol{mac: ap.sha, ip: ap.spa})
+fn new_arp_handler(nd &NetDevice) ArpHandler {
+    shared at := nd.arp_table
+    return ArpHandler {
+        new_socket(nd, nd.arp_chan, shared at)
+    }
+}
 
+fn (mut sock ArpHandler) handle_arp_reply(ap &ArpHdr) {
+	sock.arp_table.insert(ArpTableCol{mac: ap.sha, ip: ap.spa})
+}
 
+fn (mut sock ArpHandler) handle_arp_request (ap &ArpHdr, sock_addr &SocketAddress) {
+	sock.arp_table.insert(ArpTableCol{mac: ap.sha, ip: ap.spa})
+
+    res_pkt := sock.create_arp_reply(sock_addr) or { panic(err) }
+    sock.netdevice_chan.send_chan <- &res_pkt
+}
+
+fn (sock &Socket) create_arp_reply(dst_addr &SocketAddress) ?Packet {
 	mut res_pkt := Packet {
 		l2_hdr: &HdrNone {}
 		l3_hdr: &ArpHdr {
@@ -105,23 +121,48 @@ fn (mut nd NetDevice) handle_arp_request (ap &ArpHdr, sock_addr &SocketAddress) 
 			hw_size: 6,
 			proto_size: 4,
 			op: conv.htn16(u16(ArpOpcode.reply)),
-			sha: nd.physical_addr,
-			spa: nd.ip_addr,
-			tha: ap.sha,
-			tpa: ap.spa,
+			sha: sock.my_physical_addr,
+			spa: sock.my_ip_addr,
+			tha: dst_addr.physical_addr,
+			tpa: dst_addr.ip_addr,
 		}
 		l4_hdr: &HdrNone{}
 		payload: []byte{}
 	}
 
-	nd.send_ethernet(mut res_pkt, sock_addr) or {panic(err)}
+    sock.create_ethernet(mut res_pkt, dst_addr)?
+    return res_pkt
 }
 
-fn (mut nd NetDevice) handle_arp (pkt &Packet, ap &ArpHdr, sock_addr &SocketAddress) {
-	op := conv.nth16(ap.op)
-	if op == u16(ArpOpcode.request) {
-		nd.handle_arp_request(ap, sock_addr)
-	} else if op == u16(ArpOpcode.reply) {
-		nd.handle_arp_reply(ap)
-	}
+
+fn arp_handler (ah ArpHandler) {
+    mut sock := ah
+    for true {
+        pkt := <- sock.netdevice_chan.recv_chan
+    	mut sock_addr := SocketAddress{}
+        l2_hdr := pkt.l2_hdr
+        match l2_hdr {
+            HdrNone {
+                continue
+            }
+            EthHdr {
+                sock_addr.physical_addr = l2_hdr.smac
+            }
+        }
+        l3_hdr := pkt.l3_hdr
+        match l3_hdr {
+            HdrNone { continue }
+            IpHdr { continue }
+            ArpHdr { 
+                ap := l3_hdr
+	            op := conv.nth16(ap.op)
+                sock_addr.ip_addr = ap.spa
+	            if op == u16(ArpOpcode.request) {
+	            	sock.handle_arp_request(ap, sock_addr)
+	            } else if op == u16(ArpOpcode.reply) {
+	            	sock.handle_arp_reply(ap)
+	            }
+            }
+        }
+    }
 }

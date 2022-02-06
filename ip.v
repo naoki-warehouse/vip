@@ -83,19 +83,18 @@ fn (ip &IpHdrBase) str() string {
 	return s
 }
 
-fn (mut nd NetDevice) handle_ip(pkt &Packet, ip &IpHdr, mut sock_addr SocketAddress) {
+fn (nd &NetDevice) handle_ip(pkt &Packet) {
 	l4_hdr := pkt.l4_hdr
 	match l4_hdr {
 		HdrNone {
-
 		}
 		IcmpHdr {
-			nd.handle_icmp(pkt, l4_hdr, mut sock_addr)
+            nd.icmp_chan.recv_chan <- pkt
 		}
 	}
 }
 
-fn (mut nd NetDevice) send_ip(mut pkt Packet, dst_addr &SocketAddress)? {
+fn (sock &Socket) create_ip(mut pkt Packet, dst_addr &SocketAddress)? {
 	mut ip_hdr_base := &IpHdrBase {
 		vh: (4 << 4) | (5)
 		tos: 0
@@ -105,7 +104,7 @@ fn (mut nd NetDevice) send_ip(mut pkt Packet, dst_addr &SocketAddress)? {
 		ttl: 64
 		protocol: 0
 		chksum: 0
-		src_addr: nd.ip_addr
+		src_addr: sock.my_ip_addr
 		dst_addr: dst_addr.ip_addr
 	}
 
@@ -123,5 +122,5 @@ fn (mut nd NetDevice) send_ip(mut pkt Packet, dst_addr &SocketAddress)? {
 		base: ip_hdr_base
 	}
 
-	return nd.send_ethernet(mut pkt, dst_addr)
+    return sock.create_ethernet(mut pkt, dst_addr)
 }

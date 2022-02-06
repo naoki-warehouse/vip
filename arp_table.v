@@ -42,8 +42,10 @@ fn (shared at ArpTable) get(ip IpAddress) ?ArpTableCol {
 
 fn (shared at ArpTable) print() {
 	rlock at {
+		mut i := 0
 		for _, atc in at.table {
-			println("${atc.mac} ${atc.ip}")
+			println("$i: ${atc.mac} ${atc.ip}")
+			i += 1
 		}
 	}
 }
