@@ -36,28 +36,6 @@ fn (eh &EthHdr) write_bytes(mut buf []byte) ?int {
 	return offset
 }
 
-fn (nd &NetDevice) create_ethernet(mut pkt Packet, dst_addr &SocketAddress)? {
-	mut l2_hdr := &EthHdr {
-		dmac: dst_addr.physical_addr
-		smac: nd.physical_addr
-	}
-
-	l3_hdr := pkt.l3_hdr
-	match l3_hdr {
-		HdrNone {
-			panic("l3_hdr is not set")
-		}
-		ArpHdr {
-			l2_hdr.ether_type = conv.htn16(0x0806)
-		}
-		IpHdr {
-			l2_hdr.ether_type = conv.htn16(0x0800)
-		}
-	}
-	pkt.l2_hdr = l2_hdr
-}
-
-
 fn (sock &Socket) create_ethernet(mut pkt Packet, dst_addr &SocketAddress)? {
 	mut l2_hdr := &EthHdr {
 		dmac: dst_addr.physical_addr
