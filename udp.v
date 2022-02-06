@@ -4,10 +4,10 @@ import net.conv
 
 [packed]
 struct UdpHdr {
-    src_port u16
-    dst_port u16
-    segment_length u16
-    chksum u16
+	src_port       u16
+	dst_port       u16
+	segment_length u16
+	chksum         u16
 }
 
 fn parse_udp_header(buf []byte) ?&UdpHdr {
@@ -21,10 +21,10 @@ fn (uh &UdpHdr) len() int {
 }
 
 fn (uh &UdpHdr) str() string {
-	mut s := "src_port: ${conv.nth16(uh.src_port)} "
-	s += "dst_port: ${conv.nth16(uh.dst_port)} "
-	s += "len: ${conv.nth16(uh.segment_length)}"
-	s += "chksum: 0x${uh.chksum:04X}"
+	mut s := 'src_port: ${conv.nth16(uh.src_port)} '
+	s += 'dst_port: ${conv.nth16(uh.dst_port)} '
+	s += 'len: ${conv.nth16(uh.segment_length)}'
+	s += 'chksum: 0x${uh.chksum:04X}'
 	return s
 }
 
@@ -42,10 +42,10 @@ fn (uh &UdpHdr) write_bytes(mut buf []byte) ?int {
 fn (sock &Socket) create_udp(payload []byte, dst_addr &SocketAddress) ?Packet {
 	length := u16(int(sizeof(UdpHdr)) + payload.len)
 	chksum := calc_pseudo_header(&sock.my_ip_addr, &dst_addr.ip_addr, 17, length)
-	mut pkt := Packet {
+	mut pkt := Packet{
 		l2_hdr: &HdrNone{}
 		l3_hdr: &HdrNone{}
-		l4_hdr: &UdpHdr {
+		l4_hdr: &UdpHdr{
 			src_port: conv.htn16(4321)
 			dst_port: conv.htn16(dst_addr.port)
 			segment_length: conv.htn16(length)
@@ -53,6 +53,6 @@ fn (sock &Socket) create_udp(payload []byte, dst_addr &SocketAddress) ?Packet {
 		}
 		payload: payload
 	}
-	sock.create_ip(mut pkt, dst_addr)?
+	sock.create_ip(mut pkt, dst_addr) ?
 	return pkt
 }

@@ -9,62 +9,62 @@ struct PhysicalAddress {
 
 [packed]
 struct IpAddress {
-    addr [4]byte
+	addr [4]byte
 }
 
 struct SocketAddress {
 mut:
 	physical_addr PhysicalAddress
-	ip_addr IpAddress
-	port u16
+	ip_addr       IpAddress
+	port          u16
 }
 
 fn new_physical_address_from_buf(buf [6]byte) ?PhysicalAddress {
-	return PhysicalAddress {
+	return PhysicalAddress{
 		addr: buf
 	}
 }
 
 fn parse_physical_address(addr string) ?PhysicalAddress {
-	addrs := addr.split(":")
+	addrs := addr.split(':')
 	assert addrs.len == 6
 	mut buf := [6]byte{}
 	for i := 0; i < 6; i += 1 {
-		buf[i] = byte(strconv.parse_int(addrs[i], 16, 16)? & 0xFF)
+		buf[i] = byte(strconv.parse_int(addrs[i], 16, 16) ? & 0xFF)
 	}
 
-	return PhysicalAddress {
+	return PhysicalAddress{
 		addr: buf
 	}
 }
 
 fn (pa PhysicalAddress) str() string {
-	mut s := ""
+	mut s := ''
 	for a in pa.addr {
-		s += ":${a:02X}"
+		s += ':${a:02X}'
 	}
 
 	return s[1..]
 }
 
 fn parse_ip_address(addr string) ?IpAddress {
-	addrs := addr.split(".")
+	addrs := addr.split('.')
 	assert addrs.len == 4
 	mut buf := [4]byte{}
 	for i := 0; i < 4; i += 1 {
-		buf[i] = byte(strconv.parse_int(addrs[i], 10, 16)? & 0xFF)
+		buf[i] = byte(strconv.parse_int(addrs[i], 10, 16) ? & 0xFF)
 	}
 
-	return IpAddress {
+	return IpAddress{
 		addr: buf
 	}
 }
 
 fn (ia IpAddress) str() string {
-    mut s := ""
-    for a in ia.addr {
-        s += ".$a"
-    }
+	mut s := ''
+	for a in ia.addr {
+		s += '.$a'
+	}
 
-    return s[1..]
+	return s[1..]
 }

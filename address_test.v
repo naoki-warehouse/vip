@@ -1,7 +1,7 @@
 module main
 
 fn test_parse_physical_address() {
-	mac_str := "01:23:45:67:89:AB"
+	mac_str := '01:23:45:67:89:AB'
 	mac := parse_physical_address(mac_str) or { panic(err) }
 	assert mac.addr[0] == 0x01
 	assert mac.addr[1] == 0x23
@@ -13,7 +13,7 @@ fn test_parse_physical_address() {
 }
 
 fn test_parse_ip_address() {
-	ip_str := "192.168.10.1"
+	ip_str := '192.168.10.1'
 	ip := parse_ip_address(ip_str) or { panic(err) }
 	assert ip.addr[0] == 192
 	assert ip.addr[1] == 168

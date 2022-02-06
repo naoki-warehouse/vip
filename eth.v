@@ -4,10 +4,10 @@ import net.conv
 
 [packed]
 struct EthHdr {
-    dmac PhysicalAddress
-    smac PhysicalAddress
+	dmac PhysicalAddress
+	smac PhysicalAddress
 mut:
-    ether_type u16
+	ether_type u16
 }
 
 fn parse_ethernet_header(buf []byte) ?&EthHdr {
@@ -16,9 +16,9 @@ fn parse_ethernet_header(buf []byte) ?&EthHdr {
 }
 
 fn (eh &EthHdr) str() string {
-	mut s := "dst_mac:${eh.dmac} "
-	s += "src_mac:${eh.smac} "
-	s += "ether_type:0x${conv.nth16(eh.ether_type):04X}"
+	mut s := 'dst_mac:$eh.dmac '
+	s += 'src_mac:$eh.smac '
+	s += 'ether_type:0x${conv.nth16(eh.ether_type):04X}'
 	return s
 }
 
@@ -36,8 +36,8 @@ fn (eh &EthHdr) write_bytes(mut buf []byte) ?int {
 	return offset
 }
 
-fn (sock &Socket) create_ethernet(mut pkt Packet, dst_addr &SocketAddress)? {
-	mut l2_hdr := &EthHdr {
+fn (sock &Socket) create_ethernet(mut pkt Packet, dst_addr &SocketAddress) ? {
+	mut l2_hdr := &EthHdr{
 		dmac: dst_addr.physical_addr
 		smac: sock.my_physical_addr
 	}
@@ -45,7 +45,7 @@ fn (sock &Socket) create_ethernet(mut pkt Packet, dst_addr &SocketAddress)? {
 	l3_hdr := pkt.l3_hdr
 	match l3_hdr {
 		HdrNone {
-			panic("l3_hdr is not set")
+			panic('l3_hdr is not set')
 		}
 		ArpHdr {
 			l2_hdr.ether_type = conv.htn16(0x0806)
@@ -56,4 +56,3 @@ fn (sock &Socket) create_ethernet(mut pkt Packet, dst_addr &SocketAddress)? {
 	}
 	pkt.l2_hdr = l2_hdr
 }
-
